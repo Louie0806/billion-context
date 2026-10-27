@@ -33,7 +33,7 @@ import { enterSessionContext, log as loggerLog } from "../logger.js";
 import { codexCompactGatePre, codexCompactMode, hasCompactionTrigger, isCodexHost, replaceBiliCompactionItems } from "../codex-compact.js";
 import { emitPreflightError } from "../stream-error.js";
 import { agentProviderRecipes } from "../agent-providers.js";
-import { affinityToken, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity } from "../session-id.js";
+import { zcodeMemoryConversation, affinityToken, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity } from "../session-id.js";
 import { personaConversationOrder } from "../session-resolve.js";
 import { prefixAffinity, describeResumeMiss, type AnonymousAffinity } from "../prefix-affinity.js";
 import { buildAnonymousProvenance, type AnonymousProvenance } from "../anon-provenance.js";
@@ -1044,7 +1044,11 @@ async function handleRequest(
               : protocol === "google"
                 ? googleSystemText(parsed as GoogleRequestBody)
                 : "";
-        const conversation = protocol === "google"
+        const zcodeParentIdentity = responsesIdentity ?? openaiIdentity ?? anthropicIdentity ?? googleIdentity;
+        const zcodeMemory = zcodeParentIdentity?.clientProvided
+            ? zcodeMemoryConversation(zcodeParentIdentity.value, req.headers)
+            : undefined;
+        const conversation = zcodeMemory !== undefined ? zcodeMemory : protocol === "google"
             // #2730: the google lane is persona-aware too — dsh stamps its one
             // conversation id on every wire including gemini (`x-bili-plugin: dsh`
             // is wire-agnostic, dsh-native.ts; MODEL_API_SUFFIX routes google
@@ -1199,7 +1203,7 @@ async function handleRequest(
         // dsh-over-Responses (#2203/#2730); the explicit responses clause
         // below stays for the codex/claude instructions personas (codexTurn
         // keys verbatim and must not count).
-        const designNamespaced = personaForked
+        const designNamespaced = zcodeMemory !== undefined || personaForked
             || (protocol === "responses"
                 && codexTurn === undefined
                 && instructionsFingerprintApplies(req.headers)
@@ -1441,7 +1445,7 @@ async function handleRequest(
                 ...(anonAffinity.lineage ? { lineage: anonAffinity.lineage } : {}),
                 ...(existingProducer ? { producer: existingProducer } : anonProvenance ? { producer: anonProvenance } : {}),
             };
-        } else if (clientProvided) {
+        } else if (clientProvided && zcodeMemory === undefined) {
             // #1486: track identified clients' chains too, so a resume that
             // forks a NEW client id (cc --resume) can be matched back to its
             // parent across requests and proxy restarts (the #499 snapshot
@@ -1493,7 +1497,7 @@ async function handleRequest(
         // race-free. Fall back to the headless pending queue (codex spawn)
         // for the first request that creates a new session.
         let derivedParent: string | undefined;
-        if (!pluginAgent && !anonAffinity) {
+        if (!pluginAgent && !anonAffinity && zcodeMemory === undefined) {
             const identityAgent = consumePluginRegisterFor(clientConv ?? conversation);
             if (identityAgent) {
                 pluginAgent = identityAgent.agent;
@@ -1501,7 +1505,7 @@ async function handleRequest(
                 derivedParent = identityAgent.parentConversationId;
             }
         }
-        if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined) {
+        if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined && zcodeMemory === undefined) {
             // A codex subagent thread mints a fresh session too, but it must
             // not claim the ROOT conversation's pending register (the plugin
             // binding belongs to the root session, #317). Same for a split
@@ -1550,7 +1554,7 @@ async function handleRequest(
         // request is sent (#1214) — so consult it here too. Link-only: on
         // non-derived conversations parentConversationId is absent and this
         // is a no-op.
-        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity) {
+        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity && zcodeMemory === undefined) {
             const stamped = consumePluginRegisterFor(pluginConversation);
             if (stamped?.parentConversationId !== undefined) derivedParent = stamped.parentConversationId;
         }
@@ -1567,7 +1571,7 @@ async function handleRequest(
             // dsh review persona split onto a `|sub:<fp>` session) gets the
             // same discipline — the fork records under its suffixed id and
             // the raw key stays owned by the main session.
-            recordPluginSession((claudeSub !== undefined || personaForked) ? conversation : (pluginConversation ?? conversation), session.id);
+            recordPluginSession((claudeSub !== undefined || personaForked || zcodeMemory !== undefined) ? conversation : (pluginConversation ?? conversation), session.id);
         }
         // #1206: first request of this session — identify the client and scan
         // its plugin registry for a co-resident THIRD-PARTY compression plugin
@@ -1592,6 +1596,15 @@ async function handleRequest(
             } catch (err) {
                 log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
             }
+        }
+        if (zcodeMemory !== undefined && zcodeParentIdentity !== undefined && session.stats.requests === 0) {
+            const parentId = zcodeParentIdentity.value;
+            session.metadata.derivedFrom = parentId;
+            session.metadata.derivedFromSessionId = parentId;
+            markDirty(session);
+            persistLineageLinkNow(session);
+            const parent = peekSession(parentId) ?? getStore().loadSync(parentId, { protocol, upstreamOrigin });
+            if (parent) maybeAdoptDerivedFork({ session, parent, protocol, parsed, upstreamOrigin, enabled: opts.resumeInheritance !== false, log });
         }
         // #1486: resume-fork inheritance for identified clients. Clients such
         // as Claude Code fork a FRESH client-provided session id on --resume
@@ -1742,7 +1755,7 @@ async function handleRequest(
         // kernel would have fallen to a per-request content fingerprint) — this
         // lookup binding remains for clients that send a real conversation
         // header or session_id.
-        if (protocol === "responses" || protocol === "openai" || protocol === "anthropic") {
+        if (zcodeMemory === undefined && (protocol === "responses" || protocol === "openai" || protocol === "anthropic")) {
             const pck = (parsed as { prompt_cache_key?: unknown }).prompt_cache_key;
             if (typeof pck === "string" && pck.trim().length > 0) {
                 recordPluginSession(pck.trim(), session.id);
@@ -1799,7 +1812,8 @@ async function handleRequest(
             markDirty(session);
             log("info", `[${sessionId}] [plugin] "${pluginAgent}" asked for the proxy compression channel (native tools are not in this request) — identity and budget stay plugin-bound`);
         }
-        const pluginMode = pluginAgent !== undefined && !pluginLaneDegraded(session) && !subagentFallback.present && !compressionProxy;
+        // Memory workers retain the parent's host-side tool binding, not the internal child id.
+        const pluginMode = zcodeMemory === undefined && pluginAgent !== undefined && !pluginLaneDegraded(session) && !subagentFallback.present && !compressionProxy;
         // [#1097/#1271] Stamp the resolved CCR policy. acp_retrieve needs a tool
         // channel that can round-trip the full original, so CCR arms only where
         // that channel exists and is resolvable: proxy mode always (the proxy
