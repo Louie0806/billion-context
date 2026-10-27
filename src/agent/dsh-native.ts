@@ -601,8 +601,17 @@ function effectiveContextWindow(ctx: PluginContext): number | undefined {
 function rawBodyStringOf(init: RequestInit | undefined): string | undefined {
     const body: unknown = init?.body;
     if (typeof body === "string") return body;
-    if (body instanceof Uint8Array) return new TextDecoder().decode(body);
-    if (body instanceof ArrayBuffer) return new TextDecoder().decode(new Uint8Array(body));
+    if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+        try {
+            return new TextDecoder().decode(body instanceof Uint8Array ? body : new Uint8Array(body));
+        } catch {
+            // #4912: undecodable buffer (>V8-max-string-length throws
+            // RangeError) → undefined; sharedBodyProvablyOverWindow then
+            // bills ALL bytes as core text (media=0) — the conservative
+            // refusal direction, same convention as no-init call sites.
+            return undefined;
+        }
+    }
     return undefined;
 }
 
@@ -1402,7 +1411,14 @@ async function bodyJsonOf(init: RequestInit | undefined): Promise<unknown> {
         const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
         const encoding = contentEncodingOf(init);
         if (encoding === undefined) {
-            text = new TextDecoder().decode(bytes);
+            try {
+                text = new TextDecoder().decode(bytes);
+            } catch {
+                // #4912: undecodable buffer (>V8-max-string-length throws
+                // RangeError) → unreadable, same as any other parse failure
+                // below — every caller treats undefined as a clean skip.
+                return undefined;
+            }
         } else {
             try {
                 text = (await decodeRequestBody(encoding, Buffer.from(bytes), limitsDecodedBytes())).body.toString("utf8");

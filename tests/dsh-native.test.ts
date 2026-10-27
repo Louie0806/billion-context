@@ -2303,6 +2303,37 @@ test("#4111 mediaBytesOfWireBody/bodyProvablyOverWindow: prices the inline-media
     assert.notEqual(bodyProvablyOverWindow({ bytes: mixedBytes }, undefined, 1000), undefined, "no init to re-price → media cannot be proven → the raw floor keeps the old (conservative) verdict");
 });
 
+test("#4912 typed-array init.body: an undecodable buffer degrades to the conservative verdict instead of throwing out of the gate face", () => {
+    // Models V8's real limit: only buffers whose decoded form exceeds the
+    // max string length throw RangeError; small decodes keep working.
+    const savedDecoder = globalThis.TextDecoder;
+    const Real = globalThis.TextDecoder;
+    const passthrough = new Real();
+    const bigUrl = `data:image/png;base64,${"A".repeat(4_200_000)}`;
+    const raw = JSON.stringify({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: bigUrl } }] }] });
+    const init: RequestInit = { method: "POST", body: new TextEncoder().encode(raw) };
+    const bytes = Buffer.byteLength(raw);
+    try {
+        globalThis.TextDecoder = class {
+            constructor(_label?: string, _options?: unknown) {}
+            decode(buf?: Uint8Array | ArrayBuffer): string {
+                if (buf !== undefined && buf.byteLength > 1_000_000) throw new RangeError("Invalid string length");
+                return passthrough.decode(buf);
+            }
+        } as unknown as typeof TextDecoder;
+        // Pre-fix this call threw RangeError out of the gate face. Now the
+        // undecodable buffer bills ALL bytes as core text (media unprovable).
+        const doom = bodyProvablyOverWindow({ bytes }, init, 1000);
+        assert.ok(doom !== undefined, "undecodable over-bar body keeps the conservative (all-core-text) verdict");
+        assert.equal(doom?.mediaBytes, 0);
+        assert.equal(doom?.coreBytes, bytes);
+    } finally {
+        globalThis.TextDecoder = savedDecoder;
+    }
+    // Decodable twin of the SAME body: media credited exactly → not provably over.
+    assert.equal(bodyProvablyOverWindow({ bytes }, init, 1000), undefined, "the guard must not zero media credits on the normal path");
+});
+
 test("#3581 gate degradation reports event-driven; give-up latch stops pointless settle-retries on a dead scope", async () => {
     const attrCalls: MockAttributionCall[] = [];
     const proxy = await startMockProxy([], undefined, undefined, undefined, false, attrCalls);

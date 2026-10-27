@@ -66,7 +66,9 @@ const SEQ_SPAN_QUERY_BATCH = 500;
  *  every verbatim JSON/bytes column (byte-exact round-trip; the JSON type
  *  re-orders keys), BIGINT for ms-epoch timestamps and seqs, VARCHAR keys
  *  sized to their guards. No literal defaults on LONGTEXT columns (MySQL
- *  forbids them) — every INSERT provides every column. */
+ *  forbids them), except the five sessions json columns: expression
+ *  defaults mirroring the sqlite twin's column defaults (#4924), which the
+ *  fork row clone's 5-column sessions INSERT relies on. */
 const MYSQL_DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
     session_id        VARCHAR(255) NOT NULL PRIMARY KEY,
@@ -83,11 +85,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     updated_at        BIGINT NOT NULL,
     next_block_id     BIGINT NOT NULL DEFAULT 1,
     next_run_id       BIGINT NOT NULL DEFAULT 1,
-    meta_json         LONGTEXT NOT NULL,
-    stats_json        LONGTEXT NOT NULL,
-    metadata_json     LONGTEXT NOT NULL,
-    kstate_json       LONGTEXT NOT NULL,
-    tail_json         LONGTEXT NOT NULL,
+    meta_json         LONGTEXT NOT NULL DEFAULT ('{}'),
+    stats_json        LONGTEXT NOT NULL DEFAULT ('{}'),
+    metadata_json     LONGTEXT NOT NULL DEFAULT ('{}'),
+    kstate_json       LONGTEXT NOT NULL DEFAULT ('{}'),
+    tail_json         LONGTEXT NOT NULL DEFAULT ('{}'),
     ccr_json          LONGTEXT NULL,
     last_ingested_seq BIGINT NULL,
     orphans_json      LONGTEXT NULL
@@ -291,6 +293,21 @@ export class MysqlBackend implements StorageBackend {
                     ]);
                 }
             }
+            // #4924 CI: the fork row clone's 5-column sessions INSERT relies on
+            // column defaults exactly like the sqlite twin (schema.ts gives the
+            // json columns DEFAULT '{}') — but tables created by the pre-#4924
+            // DDL have none, so MySQL strict mode rejected the clone with
+            // ER_NO_DEFAULT_FOR_FIELD. Align existing tables idempotently
+            // (CREATE TABLE IF NOT EXISTS never upgrades them).
+            const [scols] = (await conn.query(
+                "SELECT COLUMN_NAME AS col, COLUMN_DEFAULT AS dflt FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sessions'",
+            )) as unknown as Row[][];
+            const sdflt = new Map((scols as unknown as { col?: unknown; dflt?: unknown }[]).map((r) => [String(r.col ?? ""), r.dflt]));
+            for (const col of ["meta_json", "stats_json", "metadata_json", "kstate_json", "tail_json"]) {
+                if (sdflt.has(col) && sdflt.get(col) === null) {
+                    await conn.query(`ALTER TABLE sessions MODIFY COLUMN ${col} LONGTEXT NOT NULL DEFAULT ('{}')`);
+                }
+            }
         } finally {
             conn.release();
         }
@@ -433,8 +450,8 @@ export class MysqlBackend implements StorageBackend {
                    meta_json, stats_json, metadata_json, kstate_json, tail_json, ccr_json, last_ingested_seq)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE
-                   parent_session_id = VALUES(parent_session_id),
-                   fork_point_seq = VALUES(fork_point_seq),
+                   parent_session_id = COALESCE(VALUES(parent_session_id), parent_session_id),
+                   fork_point_seq = COALESCE(VALUES(fork_point_seq), fork_point_seq),
                    protocol = VALUES(protocol),
                    label = VALUES(label),
                    title = VALUES(title),

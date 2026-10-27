@@ -460,7 +460,15 @@ async function dshCompactionMarkerInBody(input: string | URL | Request, init?: R
     }
     if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
         const bytes = body instanceof ArrayBuffer ? body : new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength);
-        return new TextDecoder().decode(bytes).includes(marker);
+        try {
+            return new TextDecoder().decode(bytes).includes(marker);
+        } catch {
+            // #4912: undecodable buffer (e.g. >V8-max-string-length, where
+            // decode throws RangeError) — fail OPEN like every other
+            // unreadable form above; the probe must never throw out of the
+            // intercept (it runs on EVERY POST, proxy up or down).
+            return false;
+        }
     }
     return false;
 }
@@ -573,9 +581,18 @@ async function directSendBodyMeasure(input: string | URL | Request, init: Reques
     if (size !== undefined) {
         const body: unknown = init?.body;
         let raw: string | undefined;
-        if (typeof body === "string") raw = body;
-        else if (body instanceof Uint8Array) raw = new TextDecoder().decode(body);
-        else if (body instanceof ArrayBuffer) raw = new TextDecoder().decode(new Uint8Array(body));
+        try {
+            if (typeof body === "string") raw = body;
+            else if (body instanceof Uint8Array) raw = new TextDecoder().decode(body);
+            else if (body instanceof ArrayBuffer) raw = new TextDecoder().decode(new Uint8Array(body));
+        } catch {
+            // #4912: undecodable buffer (>V8-max-string-length throws
+            // RangeError) → raw unknown; bodyProvablyOverWindow then bills
+            // ALL bytes as core text (media=0) — the conservative refusal
+            // direction, same convention as the Request branch below
+            // returning undefined for unreadable bodies.
+            raw = undefined;
+        }
         return { bytes: size.bytes, raw };
     }
     if (input instanceof Request) {

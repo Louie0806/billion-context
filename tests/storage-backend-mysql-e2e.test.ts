@@ -80,7 +80,15 @@ test("mysql hot path: saves land on the backend, envelopes keep being written, r
 
         const store = new SessionStore({ dir, debounceMs: 0, enabled: true });
         await store.ready();
-        const shadow = (store as unknown as { shadow?: { isAsyncBackend: boolean; viewForAsync(id: string): Promise<LegacySessionLike | null> } }).shadow;
+        const shadow = (store as unknown as {
+            shadow?: {
+                isAsyncBackend: boolean;
+                viewForAsync(id: string): Promise<LegacySessionLike | null>;
+                tailViewRowsAsync(id: string): Promise<{ seq: number; msgId: string }[]>;
+                lastLiveSeq(id: string): number | null;
+                messagesForIds(id: string, ids: readonly string[], neighbors: boolean): unknown[];
+            };
+        }).shadow;
         assert.ok(shadow, "mysql sidecar must attach after ready()");
         assert.equal(shadow.isAsyncBackend, true, "the shadow must ride the async backend");
 
@@ -117,6 +125,27 @@ test("mysql hot path: saves land on the backend, envelopes keep being written, r
         const shExt = (store as unknown as { shadow: { setSessionExtAsync(id: string, k: string, v: unknown): Promise<void>; getSessionExtAsync(id: string, k: string): Promise<unknown> } }).shadow;
         await shExt.setSessionExtAsync(sid, "inc:test-key", [1, 2, 3]);
         assert.deepEqual(await shExt.getSessionExtAsync(sid, "inc:test-key"), [1, 2, 3]);
+
+        // Fork lane wiring (#4911): the async twins route through the
+        // backend on mysql — the awaited clone lands real rows (visible
+        // through another async read twin, no polling needed: the clone
+        // resolves after commit), and the sync facades still miss by design
+        // (the envelope stays the sync read path; making them serve would be
+        // a regression of the documented architecture).
+        const childSid = `${sid}-fork`;
+        const liveSeq = await store.unifiedLastLiveSeqAsync(sid);
+        const throughSeq = Math.max(-1, liveSeq ?? -1);
+        assert.ok(throughSeq >= 0, "parent has live rows after the awaited save");
+        assert.ok(await store.unifiedCloneSessionRowsAsync(sid, childSid, throughSeq), "awaited clone routes to the backend");
+        const parentRows = await shadow!.tailViewRowsAsync(sid);
+        const childRows = await shadow!.tailViewRowsAsync(childSid);
+        assert.equal(childRows.length, parentRows.length, "every parent row cloned");
+        for (let i = 0; i < childRows.length; i++) {
+            assert.equal(childRows[i]!.seq, parentRows[i]!.seq, "child keeps the parent's seq values");
+            assert.equal(childRows[i]!.msgId, parentRows[i]!.msgId);
+        }
+        assert.equal(shadow!.lastLiveSeq(sid), null, "sync lastLiveSeq still misses on mysql");
+        assert.deepEqual(shadow!.messagesForIds(sid, ["no-such-id"], true), [], "sync window reads still miss on mysql");
 
         await store.closeQuietlyAsync();
 

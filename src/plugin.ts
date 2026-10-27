@@ -1427,7 +1427,10 @@ export async function handlePluginFork(payload: string, res: ServerResponse): Pr
     if (!parent) return forkReply(res, 404, { ok: false, code: "PARENT_NOT_FOUND", error: "parent conversation not found" });
     acquireInFlight(parent);
     try {
-        await withSessionLock(parent, () => {
+        // #4911: async callback — the unified row clone below awaits the
+        // backend on network backends; withSessionLock accepts () => T |
+        // Promise<T>, so the lock scope and ordering are unchanged.
+        await withSessionLock(parent, async () => {
             if (replay()) return;
             if (conversations.has(request.childConversationId) || pendingRegisters.some((r) => r.conversationId === request.childConversationId) || (registeredIds.has(request.childConversationId) && !forkChildHeldBySameParent(request.childConversationId, request.parentConversationId))) return forkReply(res, 409, { ok: false, code: "CHILD_CONFLICT", error: "child conversation already registered" });
             let snapshot: ReturnType<typeof forkSnapshot>;
@@ -1567,9 +1570,13 @@ export async function handlePluginFork(payload: string, res: ServerResponse): Pr
                 // not live count - 1. Tombstones keep their seq, so once any
                 // row is retired count < lastLiveSeq + 1 and count - 1 silently
                 // dropped the newest live rows from the cloned child.
-                const lastLiveSeq = store.unifiedLastLiveSeq(parent.id);
+                // #4911: awaited through the async twins — on network backends
+                // (mysql) the sync facades miss by design and these route
+                // through the backend; sqlite delegates to the identical sync
+                // bodies, so behavior there is unchanged.
+                const lastLiveSeq = await store.unifiedLastLiveSeqAsync(parent.id);
                 const throughSeq = lastLiveSeq === null ? -1 : lastLiveSeq;
-                if (throughSeq >= 0 && !store.unifiedCloneSessionRows(parent.id, child.id, throughSeq)) {
+                if (throughSeq >= 0 && !(await store.unifiedCloneSessionRowsAsync(parent.id, child.id, throughSeq))) {
                     loggerLog("debug", `fork ${request.childConversationId}: no unified rows to clone for ${parent.id} (kernel-only fork)`);
                 }
             } catch (err) {
