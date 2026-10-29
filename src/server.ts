@@ -59,6 +59,7 @@ import { getSession, hasProcessedState, listSessions, peekSession, type PendingR
 import { detectStaleInstall } from "./update.js";
 import { decideEaddrinuse, eaddrinuseExitCode, isPortBusyError, postBindCanLadder, UPGRADE_REPLACEMENT_ENV, type FailFastReason } from "./listen-policy.js";
 import { getAdvisoryState, cannotResolveTarget } from "./advisory.js";
+import { pckNoticeActive } from "./pck-notice.js";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 import {
     coreToGoogle,
@@ -1264,6 +1265,15 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
                     (opts.passthroughSource === "env"
                         ? "Unset ACP_PASSTHROUGH (or drop --passthrough) and restart to re-enable compression."
                         : "Clear it in the web UI (概览 page) or remove \"passthrough\": true from the config file to re-enable compression."),
+            );
+        }
+        // #5079: first upgrade onto the default-off pck switch — tell relay /
+        // account-pool users their affinity signal is off until they opt back in.
+        if (pckNoticeActive(opts.promptCache.routing)) {
+            log(
+                "info",
+                `[pck] prompt_cache_key self-stamping is OFF by default now (#5079). ` +
+                    "Upstreams that route prefix cache by this key (relays like workbuddy panel/hub, account pools) need it ON — set promptCache.routing=auto (or ACP_PROMPT_CACHE_ROUTING=auto) or use the web UI switch; direct official-API users can ignore this.",
             );
         }
         // #2090 plan A: signed requests refused earlier that the user has not
