@@ -70,12 +70,13 @@ test("memo: non-kernel ids always recount (no cross-text poisoning)", () => {
 test("memo: same id with rewritten text recounts (renderTags view keeps ids)", () => {
     clearEstimateCoreMessagesMemoForTests();
     // Seed the memo with the plain-text view, then hand it the same logical
-    // message re-rendered with an <acp tokens=...> prefix — same id, longer
-    // text, fewer counted payload bytes behind the tag.
-    const id = minted(0xabc123);
-    const plain = estimateCoreMessages([coreMsg(id, "OLD_WORK_B old work body text")]);
-    const wrapped = estimateCoreMessages([coreMsg(id, '<acp tokens="4.4K" type="text">m00003</acp>\nOLD_WORK_B old work body text')]);
-    const wrappedFresh = estimateCoreMessages([coreMsg(id, '<acp tokens="4.4K" type="text">m00003</acp>\nOLD_WORK_B old work body text')]);
+    // message re-rendered in place (a renderTags-style prefix changes the
+    // length): the length gate forces a recount, so the wrapped total differs
+    // from the plain one the memo first saw, and is stable across repeats.
+    const id = minted(0x5130);
+    const plain = estimateCoreMessages([coreMsg(id, 'old work body text')]);
+    const wrapped = estimateCoreMessages([coreMsg(id, '\nOLD_WORK_B old work body text')]);
+    const wrappedFresh = estimateCoreMessages([coreMsg(id, '\nOLD_WORK_B old work body text')]);
     assert.equal(wrapped, wrappedFresh);
     assert.notEqual(wrapped, plain);
 });
