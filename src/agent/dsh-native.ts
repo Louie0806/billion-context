@@ -2389,6 +2389,22 @@ export function apply(ctx: PluginContext): void {
         return headers;
     };
 
+    // #4894: window source for the degraded direct path. The shared guard in
+    // directSendOrRefuse measures against the stamped header — but headersFor
+    // only runs on the proxy branch, so a request that finds no live proxy
+    // (slow boot past the spawn budget, #4609) carried none and the guard
+    // stayed disarmed in exactly the state that produced the prompt_too_long
+    // storm. Same resolution headersFor stamps (#2381: the session's live
+    // model first, the host's global default as fallback, cached model info
+    // only), minus the tools/attribution gates those serve plugin-mode
+    // stamping — a miss anywhere answers undefined and the arm fails open,
+    // so this can never false-refuse from missing data.
+    state.declaredWindowForDirect = () => {
+        const target = sessionModelTargetOf(ctx) ?? globalModelTarget(modelInfo.services);
+        if (target !== undefined) refreshModelInfo(register.base, target);
+        return effectiveContextWindow(ctx);
+    };
+
     // #2399: fork-child adoption runs before headersFor stamps the child's
     // first plugin request — the proxy then binds the replayed prefix to the
     // adopted parent state on that very request instead of starting fresh.

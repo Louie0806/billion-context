@@ -129,7 +129,13 @@ export function kickBlogRefresh(opts?: { force?: boolean }): void {
     const due = (opts?.force ?? false) || Date.now() - lastRoundStartedAt >= ROUND_TTL_MS;
     if (!due) return;
     lastRoundStartedAt = Date.now();
-    inflight = runRound().finally(() => { inflight = undefined; });
+    const base = runRound();
+    // gate is the rejection-immune twin of base (the same guard
+    //  runBlogRefreshRound carries): kickBlogRefresh is fire-and-forget, so
+    //  an unexpected runRound reject must never surface as an
+    //  unhandledRejection (a process crash on Node ≥ 15).
+    const gate = settleRoundImmune(base, () => { if (inflight === gate) inflight = undefined; });
+    inflight = gate; // assigned synchronously — the settle callback can only run later
 }
 
 /** One full GitHub pull round, awaitable (tests); production callers use
@@ -146,8 +152,7 @@ export async function runBlogRefreshRound(opts?: { force?: boolean }): Promise<{
         const base = runRound();
         // gate is the rejection-immune twin of base: it only tracks settle-
         // ment so an unexpected reject can never leak as an unhandled one.
-        const gate = base.then(() => undefined, () => undefined)
-            .finally(() => { if (inflight === gate) inflight = undefined; });
+        const gate = settleRoundImmune(base, () => { if (inflight === gate) inflight = undefined; });
         inflight = gate; // assigned synchronously — the settle callback can only run later
         try {
             await base;
@@ -278,6 +283,10 @@ async function getText(url: string, account?: (bytes: number) => void): Promise<
     const result = await fetchWithTimeout(url, ghHeaders(), FETCH_TIMEOUT_MS);
     try {
         if (!result.response.ok) throw new Error(`raw GET ${url} → HTTP ${result.response.status}`);
+        const declared = contentLengthOf(result.response.headers);
+        if (declared !== undefined && declared > MAX_TEXT_BYTES) {
+            throw new Error(`text document exceeds ${MAX_TEXT_BYTES} bytes (content-length ${declared}): ${url}`);
+        }
         const buf = Buffer.from(await result.response.arrayBuffer());
         if (buf.byteLength > MAX_TEXT_BYTES) throw new Error(`text document exceeds ${MAX_TEXT_BYTES} bytes: ${url}`);
         account?.(buf.byteLength);
@@ -300,6 +309,8 @@ async function getImage(url: string, account?: (bytes: number) => void): Promise
     try {
         if (result.response.status === 404) return undefined;
         if (!result.response.ok) throw new Error(`image GET ${url} → HTTP ${result.response.status}`);
+        const declared = contentLengthOf(result.response.headers);
+        if (declared !== undefined && declared > MAX_IMAGE_BYTES) return undefined; // never download the body
         const buf = Buffer.from(await result.response.arrayBuffer());
         if (buf.byteLength === 0 || buf.byteLength > MAX_IMAGE_BYTES) return undefined;
         account?.(buf.byteLength);
@@ -313,6 +324,27 @@ function ghHeaders(accept?: string): Record<string, string> {
     const h: Record<string, string> = { "user-agent": "billion-context-blog-refresh" };
     if (accept !== undefined) h.Accept = accept;
     return h;
+}
+
+/** Rejection-immune settle twin of a round promise — the guard BOTH
+ *  fire-and-forget launchers (kickBlogRefresh, runBlogRefreshRound's own
+ *  round start) route through: the returned promise only tracks settlement,
+ *  so an unexpected runRound reject can never leak as an unhandledRejection
+ *  (Node ≥ 15 crashes the process on one); onSettle clears `inflight`
+ *  (caller-guarded so an older round cannot clear a newer one). */
+export function settleRoundImmune(base: Promise<void>, onSettle: () => void): Promise<void> {
+    return base.then(() => undefined, () => undefined).finally(onSettle);
+}
+
+/** Numeric `content-length` of a response — undefined when the header is
+ *  absent or not a plain digit run. An over-limit declaration lets
+ *  getText/getImage reject/miss BEFORE reading the body, so a huge response
+ *  never enters RAM; the post-read byte checks stay the authority when the
+ *  header is absent or lies. */
+function contentLengthOf(headers: Headers): number | undefined {
+    const v = headers.get("content-length");
+    if (v === null || !/^\d+$/.test(v)) return undefined;
+    return Number(v);
 }
 
 /** Map with bounded parallelism (CONCURRENCY), preserving input order; the

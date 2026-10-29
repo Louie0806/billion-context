@@ -55,16 +55,23 @@ function mysqlEnv(dsn: string): NodeJS.ProcessEnv {
 
 /** Poll the async twin until the session row lands (mysql network + queue
  *  latency). tail_json may legitimately carry null tailSeqs (a corpus
- *  session with empty lastMessages), so the session ROW is the wait signal. */
-async function untilRows(store: SessionStore, id: string, ms = 5000): Promise<void> {
+ *  session with empty lastMessages), so the session ROW is the wait signal.
+ *  The margin is deliberately generous: on the CI docker service a 5s budget
+ *  already flaked once under a loaded 2-vCPU runner (#4666 review round 2). */
+async function untilRows(store: SessionStore, id: string, ms = 30_000): Promise<void> {
     const deadline = Date.now() + ms;
+    let lastError: string | undefined;
     while (Date.now() < deadline) {
-        const shadow = (store as unknown as { shadow?: { viewForAsync(sid: string): Promise<{ id?: string } | null> } }).shadow;
+        const shadow = (store as unknown as { shadow?: { viewForAsync(sid: string): Promise<{ id?: string } | null>; stats?: { lastError?: string; disabled?: boolean } } }).shadow;
+        lastError = shadow?.stats?.lastError;
         const view = shadow ? await shadow.viewForAsync(id) : null;
         if (view) return;
         await new Promise((r) => setTimeout(r, 50));
     }
-    assert.fail(`mysql rows for ${id} did not land within ${ms}ms`);
+    // #4926: the async record path only LOGS after 3 consecutive failures, so
+    // a single silent ingest failure produces zero log lines — surface the
+    // shadow's own error latch in the assertion instead of another blind red.
+    assert.fail(`mysql rows for ${id} did not land within ${ms}ms (shadow.lastError: ${lastError ?? "<none — ingest never failed or never ran>"})`);
 }
 
 test("mysql hot path: saves land on the backend, envelopes keep being written, restart stays warm", { skip: DSN ? false : "BILI_MYSQL_TEST_DSN not set" }, async () => {
@@ -72,13 +79,15 @@ test("mysql hot path: saves land on the backend, envelopes keep being written, r
     Object.assign(process.env, mysqlEnv(DSN));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bili-mysql-e2e-"));
     const sid = `mysql-e2e-${Date.now().toString(36)}`;
+    let store: SessionStore | undefined;
+    let reopen: SessionStore | undefined;
     try {
         // A corpus session folded once (deadrefs case has blocks + contents).
         const corpus = await loadCorpusCase(dir, "deadrefs", "corpus-deadrefs", "anthropic");
         corpus.id = sid;
         corpus.metadata.label = sid;
 
-        const store = new SessionStore({ dir, debounceMs: 0, enabled: true });
+        store = new SessionStore({ dir, debounceMs: 0, enabled: true });
         await store.ready();
         const shadow = (store as unknown as {
             shadow?: {
@@ -152,7 +161,7 @@ test("mysql hot path: saves land on the backend, envelopes keep being written, r
         // Restart on the same DSN: the sidecar reattaches, the session is
         // still fully served (envelope + backend rows), and a second save
         // lands again (watermark path on the async backend).
-        const reopen = new SessionStore({ dir, debounceMs: 0, enabled: true });
+        reopen = new SessionStore({ dir, debounceMs: 0, enabled: true });
         await reopen.ready();
         const warm = reopen.loadSync(sid);
         assert.ok(warm, "cold load after restart must serve (envelope path)");
@@ -161,6 +170,13 @@ test("mysql hot path: saves land on the backend, envelopes keep being written, r
         await reopen.closeQuietlyAsync();
     } finally {
         Object.assign(process.env, prevEnv);
+        // Failure-path hygiene: an assertion above means the stores never
+        // reached their closeQuietlyAsync — an open mysql pool keeps the
+        // event loop alive on its sockets and hangs the whole CI job (the
+        // 2026-10-27 mysql-contract cancel was exactly this). allSettled so
+        // a second close after the success-path close can never mask the
+        // original failure.
+        await Promise.allSettled([store?.closeQuietlyAsync(), reopen?.closeQuietlyAsync()]);
         fs.rmSync(dir, { recursive: true, force: true });
     }
 });

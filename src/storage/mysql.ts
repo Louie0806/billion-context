@@ -12,9 +12,17 @@
  * columns are projections. JSON columns stay LONGTEXT — MySQL's JSON type
  * normalizes key order and would break the byte-exact digest contract.
  *
- * The DDL is the v7 shape directly (fresh-only: a MySQL deployment starts
- * at schema version 7 with the full table set; the sqlite migration
- * ladder does not apply).
+ * The DDL is the v8 shape directly for fresh installs. A legacy v7 library
+ * upgrades in place at init(): probe information_schema + idempotent
+ * ALTERs, then a STREAMING data step under a server-side named lock —
+ * identity backfill plus duplicate-row collapse, one session per
+ * transaction with 500-row pages (#4666; parity with the sqlite v8
+ * migration step, itself reworked for #4677's whole-table OOM class) —
+ * gated on the bili_meta schema_version stamp so a crash mid-migration
+ * re-runs instead of stranding legacy rows at identity='' forever. The
+ * lock serializes concurrently-booting instances against the same library:
+ * without it two processes would scan the same dirty groups and
+ * double-delete rows / double-refund CAS refs.
  *
  * Concurrency: one mysql2 connection pool per backend instance; every
  * multi-statement operation rides a dedicated-connection transaction.
@@ -56,7 +64,20 @@ import type {
  *  Same discipline as the jimp lazy load (src/image-rescale.ts, #3516). */
 export type Mysql2Module = typeof import("mysql2/promise");
 
-const MYSQL_SCHEMA_VERSION = 7;
+const MYSQL_SCHEMA_VERSION = 8;
+
+/** Parity constants with the sqlite v8 streaming backfill
+ *  (src/storage/schema.ts, #4677): same page size, same printable absent
+ *  marker. The printable form exists because node:sqlite truncates bound
+ *  strings at an embedded NUL (the \u0000-shaped marker silently bound as
+ *  ''); MySQL accepts either, but the STORED value must stay identical
+ *  across backends so one library shape reads the same on both. */
+const ABSENT_IDENTITY = "absent:";
+const V8_BACKFILL_PAGE = 500;
+/** Seconds each GET_LOCK attempt waits for the other instance's data step
+ *  to finish before retrying — a waiter loops until it acquires the lock;
+ *  the migration is resumable, so the latecomer then finds nothing left. */
+const MIGRATION_LOCK_POLL_S = 30;
 
 /** PR #4725 N3 (mirror of store.ts): covered-seq span point queries chunk the
  *  msg_id IN (…) list at the same 500 batch size for cross-backend parity. */
@@ -257,41 +278,192 @@ export class MysqlBackend implements StorageBackend {
                 if (s.length === 0) continue;
                 await conn.query(s);
             }
+            const [metaRows] = (await conn.query(
+                "SELECT meta_value FROM bili_meta WHERE meta_key = 'schema_version'",
+            )) as unknown as Row[][];
+            // meta_value is VARCHAR(256): the driver hands the stamp back as a
+            // string, so the number-only num() coercion would yield 0 and fire
+            // the v8 data step on EVERY boot instead of exactly once (#4666).
+            // Parse the decimal string explicitly.
+            const rawStamp = (metaRows[0] as Row | undefined)?.meta_value;
+            const parsedStamp = Number(rawStamp);
+            const current = Number.isFinite(parsedStamp) ? parsedStamp : 0;
+            if (current < MYSQL_SCHEMA_VERSION) {
+                // #4390 v8: position-independent identity + historian
+                // tombstones. CREATE TABLE IF NOT EXISTS does not upgrade an
+                // existing v7 table — probe information_schema and ALTER
+                // idempotently (MySQL has no ADD COLUMN IF NOT EXISTS). The
+                // data step below is gated on the STAMP, not column presence:
+                // a crash between these DDLs and the backfill must re-run on
+                // the next boot instead of leaving legacy rows at
+                // identity='' forever (#4666). Every step is idempotent, so a
+                // partial re-run converges.
+                const [cols] = (await conn.query(
+                    "SELECT COLUMN_NAME AS col FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'",
+                )) as unknown as Row[][];
+                const have = new Set((cols as unknown as { col?: unknown }[]).map((r) => String(r.col ?? "")));
+                if (!have.has("identity")) {
+                    await conn.query("ALTER TABLE messages ADD COLUMN identity VARCHAR(64) NOT NULL DEFAULT ''");
+                    await conn.query("ALTER TABLE messages ADD INDEX idx_messages_identity (session_id, msg_id, identity)");
+                }
+                if (!have.has("retired_at")) {
+                    await conn.query("ALTER TABLE messages ADD COLUMN retired_at BIGINT NULL");
+                }
+                // MySQL DDL commits implicitly, so the ALTERs above are
+                // already durable when the data step starts. It streams one
+                // session per transaction under a cross-process named lock
+                // (see migrateV8Identities) and either fully lands or resumes
+                // from the committed sessions on the next boot.
+                await this.migrateV8Identities();
+            }
+            // Stamp advances but never downgrades: a future library stamped
+            // higher than this build keeps its stamp.
             await conn.query(
                 "INSERT INTO bili_meta (meta_key, meta_value) VALUES ('schema_version', ?) " +
-                    "ON DUPLICATE KEY UPDATE meta_value = meta_value",
-                [String(MYSQL_SCHEMA_VERSION)],
+                    "ON DUPLICATE KEY UPDATE meta_value = GREATEST(CAST(meta_value AS UNSIGNED), CAST(? AS UNSIGNED))",
+                [String(MYSQL_SCHEMA_VERSION), String(MYSQL_SCHEMA_VERSION)],
             );
-            // #4390 v8: position-independent identity + historian tombstones.
-            // CREATE TABLE IF NOT EXISTS does not upgrade an existing v7
-            // table — probe information_schema and ALTER idempotently
-            // (MySQL has no ADD COLUMN IF NOT EXISTS).
-            const [cols] = (await conn.query(
-                "SELECT COLUMN_NAME AS col FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'",
-            )) as unknown as Row[][];
-            const have = new Set((cols as unknown as { col?: unknown }[]).map((r) => String(r.col ?? "")));
-            if (!have.has("identity")) {
-                await conn.query("ALTER TABLE messages ADD COLUMN identity VARCHAR(64) NOT NULL DEFAULT ''");
-                await conn.query("ALTER TABLE messages ADD INDEX idx_messages_identity (session_id, msg_id, identity)");
-            }
-            if (!have.has("retired_at")) {
-                await conn.query("ALTER TABLE messages ADD COLUMN retired_at BIGINT NULL");
-            }
-            if (!have.has("identity") || !have.has("retired_at")) {
-                // Backfill identities from the CAS bytes (old rows keep the
-                // polluted formula's hashes until rewritten; heal them now).
+        } finally {
+            conn.release();
+        }
+    }
+
+    /** The v8 data step (#4666; parity with schema.ts' migrateV8Identities,
+     *  the #4677 rework): stream unbackfilled messages one session per
+     *  transaction, 500-row seq-cursor pages — memory holds one page window
+     *  plus one session's keeper keys, never the library's bytes, so
+     *  multi-GB libraries upgrade without OOMing the process (#4806). Within
+     *  each session's ordered scan the FIRST arrival of a (msg_id, identity)
+     *  key is kept and later generations dropped, handing their media
+     *  mappings + message rows + CAS refs back (delete referencing rows
+     *  FIRST — the #4242 discipline; the refcount > 0 floor mirrors
+     *  releaseContent so an already-corrupt ledger cannot go negative — gc
+     *  collects the <= 0 rows). A crash between sessions leaves the done
+     *  sessions committed and the stamp still below v8, so the next boot
+     *  skips them (no identity='' rows left) and resumes. Rows whose content
+     *  bytes are missing from the CAS get the ABSENT marker so their session
+     *  terminates instead of rescanning forever — joins treat it exactly
+     *  like the pre-v8 '' leftover.
+     *
+     *  Runs under a server-side NAMED LOCK: two bili processes booting
+     *  against the same library concurrently would otherwise both scan the
+     *  same dirty groups and double-delete rows / double-refund refs (the
+     *  UNIQUE(session_id, msg_id, content_hash) key cannot catch
+     *  different-hash generations of one logical message). Named locks are
+     *  connection-scoped and released automatically when the connection
+     *  dies, so a crashed migrator cannot strand the lock; the name is
+     *  scoped to this database via DATABASE() so unrelated libraries on the
+     *  same server do not serialize against each other. */
+    private async migrateV8Identities(): Promise<void> {
+        const conn = await this.pool.getConnection();
+        let locked = false;
+        try {
+            for (;;) {
                 const [rows] = (await conn.query(
-                    "SELECT m.session_id AS sid, m.seq AS seq, m.content_hash AS content_hash, c.bytes AS body " +
-                        "FROM messages m JOIN content c ON c.hash = m.content_hash WHERE m.identity = ''",
+                    "SELECT GET_LOCK(CONCAT('bili_v8_upgrade_', DATABASE()), ?) AS ok",
+                    [MIGRATION_LOCK_POLL_S],
                 )) as unknown as Row[][];
-                for (const r of rows as unknown as Row[]) {
-                    const body = typeof r.body === "string" ? r.body : Buffer.from(r.body as Uint8Array).toString("utf8");
-                    await conn.query("UPDATE messages SET identity = ? WHERE session_id = ? AND seq = ?", [
-                        identityOfStoredContent(body),
-                        str(r.sid),
-                        num(r.seq),
-                    ]);
+                // GET_LOCK answers 1 (acquired) / 0 (timed out) / NULL (error);
+                // the driver may deliver the integer as a string, so normalize
+                // before comparing — NULL must fail loudly, not loop forever.
+                const rawOk = (rows[0] as Row | undefined)?.ok;
+                if (rawOk === null || rawOk === undefined) {
+                    throw new Error(`mysql schema v8 upgrade: GET_LOCK failed (${String(rawOk)})`);
                 }
+                const ok = Number(rawOk);
+                if (Number.isNaN(ok)) {
+                    throw new Error(`mysql schema v8 upgrade: GET_LOCK returned ${String(rawOk)}`);
+                }
+                if (ok === 1) {
+                    locked = true;
+                    break;
+                }
+                loggerLog(
+                    "info",
+                    "[storage] mysql schema v8 upgrade: another instance holds the migration lock — waiting for it to finish",
+                );
+            }
+            const [sessRows] = (await conn.query(
+                "SELECT DISTINCT session_id FROM messages WHERE identity = '' ORDER BY session_id",
+            )) as unknown as Row[][];
+            const total = (sessRows as Row[]).length;
+            if (total === 0) return;
+            loggerLog(
+                "info",
+                `[storage] mysql schema v8 migration: streaming identity backfill over ${total} session(s), one transaction per session (resumable — committed sessions are not reprocessed after a crash)`,
+            );
+            let done = 0;
+            try {
+                for (const sRow of sessRows as Row[]) {
+                    const sid = str(sRow.session_id);
+                    const seen = new Set<string>();
+                    const updates: { seq: number; identity: string }[] = [];
+                    const drops: { seq: number; contentHash: string }[] = [];
+                    let cursor = -1;
+                    for (;;) {
+                        const [pageRows] = (await conn.query(
+                            "SELECT m.seq AS seq, m.msg_id AS msg_id, m.content_hash AS content_hash, c.bytes AS body " +
+                                "FROM messages m LEFT JOIN content c ON c.hash = m.content_hash " +
+                                "WHERE m.session_id = ? AND m.identity = '' AND m.seq > ? ORDER BY m.seq LIMIT ?",
+                            [sid, cursor, V8_BACKFILL_PAGE],
+                        )) as unknown as Row[][];
+                        const rows = pageRows as Row[];
+                        if (rows.length === 0) break;
+                        for (const r of rows) {
+                            cursor = num(r.seq);
+                            const body = r.body;
+                            const identity = body == null
+                                ? ABSENT_IDENTITY
+                                : identityOfStoredContent(typeof body === "string" ? body : Buffer.from(body as Uint8Array).toString("utf8"));
+                            const key = `${str(r.msg_id)}\u0000${identity}`;
+                            if (seen.has(key)) drops.push({ seq: num(r.seq), contentHash: str(r.content_hash) });
+                            else {
+                                seen.add(key);
+                                updates.push({ seq: num(r.seq), identity });
+                            }
+                        }
+                        if (rows.length < V8_BACKFILL_PAGE) break;
+                    }
+                    // One transaction per session, on THIS connection — the
+                    // named lock lives here, and this.tx's pool checkout
+                    // cannot share a connection mid-transaction.
+                    await conn.beginTransaction();
+                    try {
+                        for (const u of updates) {
+                            await conn.query("UPDATE messages SET identity = ? WHERE session_id = ? AND seq = ?", [u.identity, sid, u.seq]);
+                        }
+                        for (const d of drops) {
+                            const [media] = (await conn.query(
+                                "SELECT media_hash FROM message_media WHERE session_id = ? AND seq = ?",
+                                [sid, d.seq],
+                            )) as unknown as Row[][];
+                            for (const mm of media as Row[]) {
+                                await conn.query("UPDATE content SET refcount = refcount - 1 WHERE hash = ? AND refcount > 0", [str(mm.media_hash)]);
+                            }
+                            await conn.query("DELETE FROM message_media WHERE session_id = ? AND seq = ?", [sid, d.seq]);
+                            await conn.query("DELETE FROM messages WHERE session_id = ? AND seq = ?", [sid, d.seq]);
+                            await conn.query("UPDATE content SET refcount = refcount - 1 WHERE hash = ? AND refcount > 0", [d.contentHash]);
+                        }
+                        await conn.commit();
+                    } catch (err) {
+                        try {
+                            await conn.rollback();
+                        } catch {
+                            /* connection-level failure — surfaces below */
+                        }
+                        throw err;
+                    }
+                    done += 1;
+                    if (done % 100 === 0 || done === total) {
+                        loggerLog("info", `[storage] mysql schema v8 migration: ${done}/${total} session(s) backfilled`);
+                    }
+                }
+            } catch (err) {
+                loggerLog(
+                    "error",
+                    `[storage] mysql schema v8 migration failed after ${done}/${total} session(s) — committed sessions keep their progress and the migration resumes automatically on the next open (no data loss, no need to touch the schema_version stamp by hand). Error: ${String(err)}`,
+                );
+                throw err;
             }
             // #4924 CI: the fork row clone's 5-column sessions INSERT relies on
             // column defaults exactly like the sqlite twin (schema.ts gives the
@@ -309,6 +481,13 @@ export class MysqlBackend implements StorageBackend {
                 }
             }
         } finally {
+            if (locked) {
+                try {
+                    await conn.query("SELECT RELEASE_LOCK(CONCAT('bili_v8_upgrade_', DATABASE()))");
+                } catch {
+                    /* best-effort — the lock auto-releases when the connection closes */
+                }
+            }
             conn.release();
         }
     }
@@ -373,8 +552,17 @@ export class MysqlBackend implements StorageBackend {
         delta?: { trustedSeq: number; boundaryMsgId: string; boundaryHash: string; trustedTailSeqs: number[] },
         opts?: { completeLog?: boolean },
     ): Promise<boolean> {
+        return this.ingestSessionOn(input, delta, opts);
+    }
+
+    private async ingestSessionOn(
+        input: IngestSessionInput,
+        delta?: { trustedSeq: number; boundaryMsgId: string; boundaryHash: string; trustedTailSeqs: number[] },
+        opts?: { completeLog?: boolean },
+        connection?: PoolConnection,
+    ): Promise<boolean> {
         const s = { ...input.session, tailJson: input.session.tailJson };
-        const ok = await this.tx(async (c): Promise<boolean> => {
+        const ingest = async (c: PoolConnection): Promise<boolean> => {
             let messages: MessageRow[];
             let watermark: number | null;
             if (delta) {
@@ -405,7 +593,9 @@ export class MysqlBackend implements StorageBackend {
                 });
                 watermark = messages.length > 0 ? messages[messages.length - 1].seq : delta.trustedSeq;
             } else {
-                const full = await this.remapPlanToAbsoluteOn(c, input);
+                // Remapping mutates tailJson; persist the same session object
+                // it updates, not the caller's separate plan-space snapshot.
+                const full = await this.remapPlanToAbsoluteOn(c, { ...input, session: s });
                 messages = full.messages;
                 watermark = full.watermark;
                 if (opts?.completeLog === true && !(await this.hasLaneExtOn(c, s.sessionId))) {
@@ -444,14 +634,18 @@ export class MysqlBackend implements StorageBackend {
                     }
                 }
             }
+            // Preserve the established lineage as a pair. MySQL evaluates
+            // assignments left-to-right: inspect the OLD parent for the fork
+            // point before assigning the parent, or first-time lineage loses
+            // its fork point. Later metadata cannot reparent a cloned child.
             await c.query(
                 `INSERT INTO sessions (session_id, parent_session_id, fork_point_seq, protocol, label, title, host_title, namespace, origin,
                    status, created_at, updated_at, next_block_id, next_run_id,
                    meta_json, stats_json, metadata_json, kstate_json, tail_json, ccr_json, last_ingested_seq)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE
-                   parent_session_id = COALESCE(VALUES(parent_session_id), parent_session_id),
-                   fork_point_seq = COALESCE(VALUES(fork_point_seq), fork_point_seq),
+                   fork_point_seq = IF(parent_session_id IS NULL, VALUES(fork_point_seq), fork_point_seq),
+                   parent_session_id = COALESCE(parent_session_id, VALUES(parent_session_id)),
                    protocol = VALUES(protocol),
                    label = VALUES(label),
                    title = VALUES(title),
@@ -674,8 +868,8 @@ export class MysqlBackend implements StorageBackend {
                 );
             }
             return true;
-        });
-        return ok;
+        };
+        return connection ? ingest(connection) : this.tx(ingest);
     }
 
     private async hasLaneExtOn(c: PoolConnection, sessionId: string): Promise<boolean> {
@@ -1002,20 +1196,61 @@ export class MysqlBackend implements StorageBackend {
     }
 
     /** #4316 PR3/3 — MySQL twin of UnifiedStore.cloneSessionRows. */
-    async cloneSessionRows(parentId: string, childId: string, throughSeq: number): Promise<boolean> {
-        const parent = await this.getSessionRow(parentId);
-        if (parent === null) return false;
-        const existing = await this.getSessionRow(childId);
-        if (existing !== null) {
-            const [alreadyRows] = (await this.pool.query(
-                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
-                [childId],
-            )) as unknown as Row[][];
-            if (num(alreadyRows[0].n) > 0) return true; // idempotent replay
-        }
+    async cloneSessionRows(parentId: string, childId: string, throughSeq: number, initial?: IngestSessionInput): Promise<boolean> {
+        if (initial && initial.session.sessionId !== childId) throw new Error("cloneSessionRows: initial session does not match child");
+        if (parentId === childId) throw new Error("cloneSessionRows: conflicting fork lineage (child equals parent)");
         const conn = await this.pool.getConnection();
         try {
             await conn.beginTransaction();
+            // Strict initial creation must reserve the child BEFORE checking
+            // for an unmirrored parent: otherwise legacy fallback could write
+            // over an unrelated persisted child. If no parent is mirrored,
+            // initialize the prepared snapshot under this same reservation.
+            const claimChild = async (): Promise<void> => {
+                try {
+                    await conn.query(
+                        `INSERT INTO sessions (session_id, created_at, updated_at)
+                         VALUES (?, ?, ?)${initial ? "" : " ON DUPLICATE KEY UPDATE session_id = VALUES(session_id)"}`,
+                        [childId, Date.now(), Date.now()],
+                    );
+                } catch (err) {
+                    if (initial && (err as { code?: string }).code === "ER_DUP_ENTRY") {
+                        throw new Error("cloneSessionRows: conflicting fork lineage (child already exists)", { cause: err });
+                    }
+                    throw err;
+                }
+            };
+            if (initial) await claimChild();
+            const [parents] = (await conn.query(
+                "SELECT session_id FROM sessions WHERE session_id = ?",
+                [parentId],
+            )) as unknown as Row[][];
+            if (parents.length === 0) {
+                if (initial && !await this.ingestSessionOn(initial, undefined, { completeLog: true }, conn)) throw new Error("cloneSessionRows: initial child ingest failed");
+                await conn.commit();
+                return initial !== undefined;
+            }
+            // The insert/no-op takes the child's unique-key lock even when no
+            // child existed. A competing clone waits, then the locking read
+            // sees the committed pair rather than a repeatable-read snapshot.
+            if (!initial) await claimChild();
+            const [children] = (await conn.query(
+                "SELECT parent_session_id, fork_point_seq FROM sessions WHERE session_id = ? FOR UPDATE",
+                [childId],
+            )) as unknown as Row[][];
+            const existing = children[0];
+            if (existing.parent_session_id != null || existing.fork_point_seq != null) {
+                if (nullableStr(existing.parent_session_id) !== parentId || nullableNum(existing.fork_point_seq) !== throughSeq) {
+                    throw new Error("cloneSessionRows: conflicting fork lineage");
+                }
+                await conn.commit();
+                return true;
+            }
+            const [alreadyRows] = (await conn.query(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
+                [childId],
+            )) as unknown as Row[][];
+            if (num(alreadyRows[0].n) > 0) throw new Error("cloneSessionRows: conflicting fork lineage (child already has messages)");
             await conn.query(
                 `INSERT INTO messages (session_id, seq, msg_id, ref, ref_num, role, kind, content_hash, identity, retired_at)
                  SELECT ?, seq, msg_id, ref, ref_num, role, kind, content_hash, identity, retired_at FROM messages
@@ -1054,6 +1289,7 @@ export class MysqlBackend implements StorageBackend {
                  ON DUPLICATE KEY UPDATE parent_session_id = VALUES(parent_session_id), fork_point_seq = VALUES(fork_point_seq)`,
                 [childId, Date.now(), Date.now(), parentId, throughSeq],
             );
+            if (initial && !await this.ingestSessionOn(initial, undefined, { completeLog: true }, conn)) throw new Error("cloneSessionRows: initial child ingest failed");
             await conn.commit();
             return true;
         } catch (err) {
@@ -1722,7 +1958,10 @@ export class MysqlBackend implements StorageBackend {
         if (kstate.nextBlockId !== undefined || kstate.nextRunId !== undefined) {
             return fail("sessions.kstate_json", "must not carry nextBlockId/nextRunId (columns own them)");
         }
-        const messages = await this.getMessages(sessionId);
+        // #4666: retired rows carry the same projections (tombstone-only) —
+        // verifying them too closes the diagnostic gap where corruption on a
+        // retired row was invisible.
+        const messages = await this.getMessages(sessionId, { includeRetired: true });
         const refByRaw = new Map((await this.getRefs(sessionId)).map((r) => [r.rawId, r.ref]));
         for (const m of messages) {
             checks++;

@@ -401,13 +401,15 @@ export class UnifiedShadow {
                     this.driftedSessions.add(legacy.id);
                     // #4323: count CONSECUTIVE sampled drifts — membership alone
                     // caps at "repeat yes/no" and cannot distinguish 3+ samples.
-                    // N in a row proves structural divergence (multi-writer
-                    // #394): escalate ONCE at the threshold with a loud WARN
-                    // naming both sides' fold counts, then freeze THIS
-                    // process's envelope writes for the session so the ping-
-                    // pong stops churning the file copy (persist.ts consults
-                    // envelopeFrozen on every save route; the unified store
-                    // keeps receiving every save either way).
+                    // N in a row marks a STRUCTURAL divergence: the watermark
+                    // clear healed nothing. Note the drift can be a single-
+                    // instance artifact (#4392 — digest shape), not only the
+                    // multi-writer #394 case; escalate ONCE at the threshold
+                    // with a loud WARN naming both sides' fold counts, then
+                    // freeze THIS process's envelope writes for the session so
+                    // the ping-pong stops churning the file copy (persist.ts
+                    // consults envelopeFrozen on every save route; the unified
+                    // store keeps receiving every save either way).
                     const streak = (this.driftStreaks.get(legacy.id) ?? 0) + 1;
                     this.driftStreaks.set(legacy.id, streak);
                     if (streak === DRIFT_ESCALATE_STREAK) {
@@ -420,7 +422,7 @@ export class UnifiedShadow {
                         } catch {
                             // counts must never break the heal path
                         }
-                        loggerLog("warn", `[storage] DIGEST DRIFT ESCALATED for ${legacy.id}: ${streak} consecutive sampled drifts — the views have stopped converging${sides}. This usually means MULTIPLE bili instances share one sessions dir (#394 anti-pattern; second-instance detection: #4177). Freezing THIS process's JSON envelope writes for the session until a clean sample re-admits it — the unified store keeps receiving every save (#4323)`);
+                        loggerLog("warn", `[storage] DIGEST DRIFT ESCALATED for ${legacy.id}: ${streak} consecutive sampled drifts — the views have stopped converging${sides}. Both legs are built in THIS process, so a persistent gap is a digest-shape mismatch first (field only one leg builds, ordering) and only then a second writer: a second bili instance sharing one sessions dir (#394 anti-pattern; second-instance detection: #4177) is one cause among others (#4392). Freezing THIS process's JSON envelope writes for the session until a clean sample re-admits it — the unified store keeps receiving every save (#4323)`);
                     }
                     // Panels consume {disabled, lastError} — make the sampled
                     // degradation visible there, not just in the counter/log.
@@ -1145,6 +1147,22 @@ export class UnifiedShadow {
                 loggerLog("warn", `[storage] fork row clone ${parentId} -> ${childId} failed (${String(err)}) — kernel-only fork`);
                 return false;
             }
+        });
+    }
+
+    /** Fork publication is strict: clone and initial state land together, or
+     * nothing lands. Unlike shadow mirrors, an error cannot mean success. */
+    createForkAsync(parentId: string, child: LegacySessionLike): Promise<boolean> {
+        if (this.stats.disabled) throw new Error("fork storage unavailable");
+        const initial = planIngest(child);
+        if (this.sync !== null) {
+            const throughSeq = this.sync.lastLiveSeq(parentId);
+            return Promise.resolve(this.sync.cloneSessionRows(parentId, child.id, throughSeq ?? -1, initial));
+        }
+        return this.enqueue(async () => {
+            if (this.stats.disabled) throw new Error("fork storage unavailable");
+            const throughSeq = await this.backend!.lastLiveSeq(parentId);
+            return this.backend!.cloneSessionRows(parentId, child.id, throughSeq ?? -1, initial);
         });
     }
 

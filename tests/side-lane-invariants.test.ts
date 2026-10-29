@@ -455,3 +455,53 @@ test("(K2) side-lane meter guard: an anchor written by a request far smaller tha
     const early = effectiveTokenCount(small, longHistory(3), 0);
     assert.equal(early.tokens, 800, "small payloads keep sizing off the anchor");
 });
+
+// (#4352): the header-less claude-code persona gate landed in src/server/handle.ts's
+// anthropic ladder with a fresh `!sideRequestLike` conjunct — a lane-symbol edit
+// in handle.ts must land with a dedicated lane-suite pin (#2170 discipline). This
+// row is that pin, contrast-shaped: the SAME claude-code persona traffic, with
+// sideRequestLike=true (tiny tool-less budget, no agent header) stays verbatim on
+// the raw key and observation-transparent, while sideRequestLike=false (full
+// budget) rides the order resolver and forks its own |sub:<fp> lane.
+test("(L) #4352 anthropic persona gate is side-vetoed: side shape stays verbatim, full-budget shape forks", async () => {
+    const h = await harness();
+    try {
+        const conv = "cc4352";
+        const ccSend = async (system: string, msgs: unknown[], maxTokens: number) => {
+            const r = await fetch(`${h.origin}/bili/${h.upstreamUrl}/v1/messages`, {
+                method: "POST",
+                headers: { "content-type": "application/json", "x-claude-code-session-id": conv },
+                body: JSON.stringify({ model: "claude-test", stream: false, max_tokens: maxTokens, system, messages: msgs }),
+            });
+            assert.equal(r.status, 200, await r.text());
+        };
+        // main turn anchors the raw key (claude-code main persona)
+        await ccSend("You are Claude Code, Anthropic's official CLI for Claude. You are an interactive agent.", [mainMsg(0)], 256);
+        const session = resolveConversation(conv).session!;
+        assert.equal(session.stats.requests, 1, "main turn counted once on the parent");
+        const sessions = listSessions().length;
+
+        // side shape: same raw id, SUB persona system, tool-less tiny budget (<=
+        // the #388 heuristic, no agent header) → the new anthropic gate is
+        // vetoed by !sideRequestLike: verbatim raw key, counted nowhere, and
+        // NO persisted |sub ghost for it.
+        const hits = h.forwarded.length;
+        await ccSend("You are a file search specialist for the parent session.", [{ role: "user", content: "summarize" }], 100);
+        assert.equal(h.forwarded.length, hits + 1, "the side call reaches the upstream");
+        assert.equal(resolveConversation(conv).session!.stats.requests, 1, "side call never counts on the parent");
+        assert.equal(listSessions().length, sessions, "side call must not fork a |sub lane");
+
+        // full-budget shape: the SAME sub persona system + disjoint history → the
+        // resolver DOES engage (proof the verbatim above is the sideRequestLike
+        // conjunct, not a dead gate): a |sub:<fp> lane appears, parent untouched.
+        await ccSend("You are a file search specialist for the parent session.", [
+            { role: "user", content: "sub-user-1" },
+            { role: "assistant", content: "sub-assistant-1" },
+            { role: "user", content: "sub-user-2" },
+        ], 1024);
+        assert.equal(listSessions().length, sessions + 1, "full-budget sub persona forks its own |sub lane");
+        assert.equal(resolveConversation(conv).session!.stats.requests, 1, "the fork lane counts nowhere on the parent");
+    } finally {
+        await h.close();
+    }
+});
