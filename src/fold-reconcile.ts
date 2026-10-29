@@ -2093,6 +2093,12 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
     // get their own accounting line below — they never count toward
     // destruction thresholds or residual classification.
     const realUnmatched = plan.unmatched.filter((id) => expected[id] === undefined);
+    // #5142: every report below states POST-ACCOUNTING numbers — expected
+    // rebases never "re-enter the wire", so counting them as unmatched would
+    // contradict the clean-pass return (which reports unmatched: 0 for the
+    // same logical state) and re-misdirect debugging toward data loss.
+    const accountedHere = plan.unmatched.length - realUnmatched.length;
+    const expectedNote = accountedHere > 0 ? `; ${accountedHere} more covered id(s) accounted as expected host behavior (#5142)` : "";
     const reasoningOnlyDrop = plan.claims.size === 0 && realUnmatched.length > 0
         && realUnmatched.every((id) => anchors[id]?.c === "reasoning");
     // Dead reasoning ids after a sanctioned drop are permanent residents of
@@ -2354,7 +2360,7 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             // event per episode: the ESCALATED latch above guards re-entry.
             const dshWitness = dshNativeCompactionWitness(session);
             if (dshWitness !== undefined) {
-                recordConflict(session, "native-compaction-inferred", `compression substrate destroyed (total-loss drift, no checkpoint marker); bili refused ${dshWitness} client-native compaction call(s) this session (#1729/#2028) — attributed to client-native compaction [inferred] (${plan.unmatched.length} covered id(s) missing, #2193/#2709)`);
+                recordConflict(session, "native-compaction-inferred", `compression substrate destroyed (total-loss drift, no checkpoint marker); bili refused ${dshWitness} client-native compaction call(s) this session (#1729/#2028) — attributed to client-native compaction [inferred] (${realUnmatched.length} covered id(s) missing, #2193/#2709)`);
             }
             const since = session.metadata[METADATA_DRIFT_SINCE] as number | undefined;
             const span = typeof since === "number" ? `, ${Math.max(1, Math.round((Date.now() - since) / 60000))} min so far` : "";
@@ -2368,7 +2374,7 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             // automatically (resetFoldDriftState on the first clean pass).
             session.metadata[METADATA_EPOCH_CONFIRM] = true;
             if (opts.log !== undefined) {
-                opts.log("error", `${tag}[fold-reconcile] fold epoch confirmation required: ${plan.unmatched.length} covered id(s) missing with NO anchor match and NO word evidence for ${streak} consecutive passes${span} — the resent history shares nothing with the fold substrate (wholesale replacement: host-native compaction outside bili's knowledge #1729/#2193, or a brand-new conversation on the same session id). Folding is paused for this session until the histories realign (old history resent or a fresh fold on the new one starts a new epoch); bili keeps the existing snapshot — nothing is deleted (#3641)${driftTok}`);
+                opts.log("error", `${tag}[fold-reconcile] fold epoch confirmation required: ${realUnmatched.length} covered id(s) missing with NO anchor match and NO word evidence for ${streak} consecutive passes${span}${expectedNote} — the resent history shares nothing with the fold substrate (wholesale replacement: host-native compaction outside bili's knowledge #1729/#2193, or a brand-new conversation on the same session id). Folding is paused for this session until the histories realign (old history resent or a fresh fold on the new one starts a new epoch); bili keeps the existing snapshot — nothing is deleted (#3641)${driftTok}`);
             }
         }
     }
@@ -2383,13 +2389,13 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
     if (opts.log !== undefined) {
         if (plan.claims.size > 0 && mode === "repair") {
             opts.log(realUnmatched.length > 0 ? "warn" : "info",
-                `${tag}[fold-reconcile] resent history drifted: ${plan.claims.size + plan.unmatched.length} covered id(s) missing — reanchored ${plan.claims.size} (${plan.byPos} positional${plan.resyncs > 0 ? `, ${plan.resyncs} order break(s) resynced` : ""}, ${plan.byTool} by toolCallId${plan.byTwin > 0 ? `, ${plan.byTwin} by toolCallId twin` : ""}${plan.bySim > 0 ? `, ${plan.bySim} by simhash corroboration` : ""}${plan.byOrder > 0 ? `, ${plan.byOrder} by order bracket` : ""}, ${plan.byNorm} by normalized identity${plan.byTurn > 0 ? `, ${plan.byTurn} by assistant-turn key` : ""}${plan.byImage > 0 ? `, ${plan.byImage} by image-capability variant` : ""}${plan.byShape > 0 ? `, ${plan.byShape} by shape census` : ""}) onto churned bytes, ${plan.unmatched.length} unmatched re-enter the wire unfolded${plan.idRewriteSuspects > 0 ? `; ${plan.idRewriteSuspects} suspected host-rewritten tool-call ids (identical content under a different toolCallId — #2396)` : ""} (#1921)${driftTok}`);
+                `${tag}[fold-reconcile] resent history drifted: ${plan.claims.size + realUnmatched.length} covered id(s) missing${expectedNote} — reanchored ${plan.claims.size} (${plan.byPos} positional${plan.resyncs > 0 ? `, ${plan.resyncs} order break(s) resynced` : ""}, ${plan.byTool} by toolCallId${plan.byTwin > 0 ? `, ${plan.byTwin} by toolCallId twin` : ""}${plan.bySim > 0 ? `, ${plan.bySim} by simhash corroboration` : ""}${plan.byOrder > 0 ? `, ${plan.byOrder} by order bracket` : ""}, ${plan.byNorm} by normalized identity${plan.byTurn > 0 ? `, ${plan.byTurn} by assistant-turn key` : ""}${plan.byImage > 0 ? `, ${plan.byImage} by image-capability variant` : ""}${plan.byShape > 0 ? `, ${plan.byShape} by shape census` : ""}) onto churned bytes, ${realUnmatched.length} unmatched re-enter the wire unfolded${plan.idRewriteSuspects > 0 ? `; ${plan.idRewriteSuspects} suspected host-rewritten tool-call ids (identical content under a different toolCallId — #2396)` : ""} (#1921)${driftTok}`);
         } else if (plan.claims.size > 0) {
             opts.log("warn",
-                `${tag}[fold-reconcile] resent history drifted: ${plan.claims.size + plan.unmatched.length} covered id(s) missing, ${plan.claims.size} matchable by anchor (${plan.byPos} positional${plan.resyncs > 0 ? `, ${plan.resyncs} resynced` : ""}, ${plan.byTool} toolCallId${plan.byTwin > 0 ? `, ${plan.byTwin} twin` : ""}${plan.bySim > 0 ? `, ${plan.bySim} simhash` : ""}${plan.byOrder > 0 ? `, ${plan.byOrder} order-bracket` : ""}, ${plan.byNorm} normalized${plan.byTurn > 0 ? `, ${plan.byTurn} turn key` : ""}${plan.byImage > 0 ? `, ${plan.byImage} image` : ""}) but reconcile=warn made no repair (#1921)${driftTok}`);
+                `${tag}[fold-reconcile] resent history drifted: ${plan.claims.size + realUnmatched.length} covered id(s) missing${expectedNote}, ${plan.claims.size} matchable by anchor (${plan.byPos} positional${plan.resyncs > 0 ? `, ${plan.resyncs} resynced` : ""}, ${plan.byTool} toolCallId${plan.byTwin > 0 ? `, ${plan.byTwin} twin` : ""}${plan.bySim > 0 ? `, ${plan.bySim} simhash` : ""}${plan.byOrder > 0 ? `, ${plan.byOrder} order-bracket` : ""}, ${plan.byNorm} normalized${plan.byTurn > 0 ? `, ${plan.byTurn} turn key` : ""}${plan.byImage > 0 ? `, ${plan.byImage} image` : ""}) but reconcile=warn made no repair (#1921)${driftTok}`);
         } else if (reasoningOnlyDrop) {
             opts.log("info",
-                `${tag}[fold-reconcile] ${plan.unmatched.length} covered reasoning core(s) dropped by the host (cross-model replay discards structured thinking; every text/tool core intact) — fold substrate healthy, tolerated (#2193 follow-up)`);
+                `${tag}[fold-reconcile] ${realUnmatched.length} covered reasoning core(s) dropped by the host (cross-model replay discards structured thinking; every text/tool core intact) — fold substrate healthy, tolerated (#2193 follow-up)`);
         } else if (markerChurnExplained) {
             // #2815: the per-pass "no anchor match" warn names mutation or
             // client-side deletion — both WRONG for marker-mint churn. Note
@@ -2399,7 +2405,7 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             if (session.metadata[METADATA_MARKER_CHURN_NOTED] !== true) {
                 session.metadata[METADATA_MARKER_CHURN_NOTED] = true;
                 opts.log("info",
-                    `${tag}[fold-reconcile] ${plan.unmatched.length} covered id(s) missing with no anchor match, but this pass stripped ${opts.markerStripped} raw marker artifact(s) — covered ids minted from marker-laden bytes churn once the strip engine cleans the resent history; benign on stateless resend (content still on the wire, re-folds re-cover), tolerated (#2815/#2789)`);
+                    `${tag}[fold-reconcile] ${realUnmatched.length} covered id(s) missing with no anchor match${expectedNote}, but this pass stripped ${opts.markerStripped} raw marker artifact(s) — covered ids minted from marker-laden bytes churn once the strip engine cleans the resent history; benign on stateless resend (content still on the wire, re-folds re-cover), tolerated (#2815/#2789)`);
             }
         } else if (session.metadata[METADATA_DRIFT_ESCALATED] !== true) {
             // #2297: once the episode escalated, the single error line IS the
@@ -2409,12 +2415,12 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             // latch, so a later episode reports fresh; the persisted latch also
             // keeps a restarted process silent mid-episode (#2293 terminal state).
             opts.log("warn",
-                `${tag}[fold-reconcile] resent history drifted: ${plan.unmatched.length} covered id(s) missing with no anchor match — mutation (content edit invalidates content-hash refs, fold silently lost) or client-side deletion/truncation (benign, message no longer on the wire)${plan.idRewriteSuspects > 0 ? `; ${plan.idRewriteSuspects} of them have an inbound twin with identical normalized content under a different toolCallId — consistent with the host rewriting authoritative tool-call ids across provider projections (host contract: keep tool-call ids byte-stable per conversation, #2396)` : ""} (#1921)${driftTok}`);
+                `${tag}[fold-reconcile] resent history drifted: ${realUnmatched.length} covered id(s) missing with no anchor match${expectedNote} — mutation (content edit invalidates content-hash refs, fold silently lost) or client-side deletion/truncation (benign, message no longer on the wire)${plan.idRewriteSuspects > 0 ? `; ${plan.idRewriteSuspects} of them have an inbound twin with identical normalized content under a different toolCallId — consistent with the host rewriting authoritative tool-call ids across provider projections (host contract: keep tool-call ids byte-stable per conversation, #2396)` : ""} (#1921)${driftTok}`);
         }
     }
     return {
         kind: plan.claims.size > 0 ? (mode === "repair" ? "reanchored" : "unmatched") : "unmatched",
-        missing: plan.claims.size + plan.unmatched.length,
+        missing: plan.claims.size + realUnmatched.length,
         claims: plan.claims.size,
         byPos: plan.byPos,
         byTool: plan.byTool,
@@ -2426,7 +2432,7 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
         byImage: plan.byImage,
         byShape: plan.byShape,
         reaped: reapedCount,
-        unmatched: plan.unmatched.length,
+        unmatched: realUnmatched.length,
         expectedRetired: expectedSize,
     };
 }
