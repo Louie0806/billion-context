@@ -181,11 +181,6 @@ export function dshTimeContextPath(msg: CoreMessage): string | undefined {
         : undefined;
 }
 
-<<<<<<< HEAD
-/** dsh lane classifier: any of the five evidence-backed identities → its
- *  canonical path (four durable carriers + the foldable time-context
- *  injection, #5109). */
-=======
 /** dsh paste-to-context image carrier (#5142, reporter evidence 2026-10-29):
  *  the ptc-mode message dsh emits when a user pastes an image into context —
  *  a user-role (text, image) pair whose text block is the generated template
@@ -224,9 +219,24 @@ export function dshToolJobNoticePath(msg: CoreMessage): string | undefined {
         : undefined;
 }
 
-/** dsh lane classifier: any of the four evidence-backed carriers → its
- *  canonical durable identity. */
->>>>>>> d90368c8 (fix(#5142): register ptc-mode and tool-job one-shot carriers from reporter wire samples)
+/** Case-insensitive ASCII prefix check over the first needle.length chars —
+ *  mirrors the asciiCI convention of src/server.ts (kept local so this
+ *  module stays dependency-free). */
+function startsWithAsciiCI(hay: string, needle: string): boolean {
+    if (hay.length < needle.length) return false;
+    for (let i = 0; i < needle.length; i++) {
+        const h = hay.charCodeAt(i);
+        const n = needle.charCodeAt(i);
+        if (h === n) continue;
+        const hl = h >= 65 && h <= 90 ? h + 32 : h;
+        if (hl !== (n >= 65 && n <= 90 ? n + 32 : n)) return false;
+    }
+    return true;
+}
+
+/** dsh lane classifier: any of the five evidence-backed identities → its
+ *  canonical path (four durable carriers + the foldable time-context
+ *  injection, #5109). */
 function dshDurableToolPath(msg: CoreMessage): string | undefined {
     return (
         dshSkillCatalogPath(msg) ??

@@ -276,11 +276,17 @@ export const METADATA_EXPECTED_REBASE = "foldExpectedRebase";
 /** #5142: one-per-episode info latch for the expected-rebase accounting line
  *  (cleared with the drift state on recovery, like the #3641 benign latches). */
 const METADATA_EXPECTED_REBASE_NOTED = "foldExpectedRebaseNoted";
+/** #5142: stored-row fetch memo — ids whose unified-store row was read and
+ *  carried NEITHER carrier NOR image evidence (negative result; stable — the
+ *  row of folded-out history does not change later). Same tried-once
+ *  discipline as #3301's foldStoredTried; an UNAVAILABLE index is never
+ *  marked (it may appear later). */
+export const METADATA_REBASE_FETCH_TRIED = "foldRebaseFetchTried";
 /** #5142: stored rows showed inline image bytes but the same-position
  *  plain-text pairing had not aligned yet (array count/order churn broke the
  *  slot this pass) — retried on later passes until paired or the id returns
  *  verbatim. */
-const METADATA_OFFLOAD_PENDING = "foldOffloadPending";
+export const METADATA_OFFLOAD_PENDING = "foldOffloadPending";
 const MAX_REBASE_LOOKUP_PER_PASS = 256;
 const MAX_REBASE_MEMO = 8192;
 
