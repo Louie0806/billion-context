@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { pathToFileURL } from "node:url";
-import { apply, planNativeDsh, shouldBootstrapNativeDsh, persistClientEvent, mediaBytesOfWireBody, bodyProvablyOverWindow, _attributionHealthForTest, _resetAttributionHealthForTest, _registerStateForTest, _resetRegisterForTest, _setModelInfoForTest, _setSpawnForTest, _setThrewRetryForTest, _settleNativeForTest, _stateHeadersForTest, _stateRespawnForTest, _stateTakeoverGateForTest, _stateToolsReadyForTest, _stateBeforeSendForTest, _stateOnResponseForTest, _noteRoutedForTest, _resetRoutedForTest, _resetWebProfileWarningForTest, _resetNonWebTraceForTest, _resetTitlesForTest, type PluginContext } from "../src/agent/dsh-native.ts";
+import { apply, planNativeDsh, shouldBootstrapNativeDsh, persistClientEvent, mediaBytesOfWireBody, bodyProvablyOverWindow, _attributionHealthForTest, _resetAttributionHealthForTest, _registerStateForTest, _resetRegisterForTest, _setModelInfoForTest, _nativeStateForTest, _setSpawnForTest, _setThrewRetryForTest, _settleNativeForTest, _stateHeadersForTest, _stateRespawnForTest, _stateTakeoverGateForTest, _stateToolsReadyForTest, _stateBeforeSendForTest, _stateOnResponseForTest, _noteRoutedForTest, _resetRoutedForTest, _resetWebProfileWarningForTest, _resetNonWebTraceForTest, _resetTitlesForTest, type PluginContext } from "../src/agent/dsh-native.ts";
 import { __resetIncrementalClientForTests } from "../src/agent/incremental-client.ts";
 import { isDshCompactionActive, _resetDshCompactionVerdictForTest } from "../src/agent/dsh-compaction-disable.ts";
 import { once } from "node:events";
@@ -2885,6 +2885,67 @@ test("#1365 explicit BILLION_CONTEXT_ATTACH remains the tool endpoint when the r
         _setSpawnForTest(undefined);
         rmrf(home);
         _resetRoutedForTest();
+        _resetRegisterForTest(undefined);
+    }
+});
+
+test("#4894 declaredWindowForDirect: session model beats global default; unknown window fails open", async () => {
+    const proxy = await startMockProxy([]);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-4894-home-"));
+    try {
+        await withEnv({ DSH_HOME: home, BILLION_CONTEXT_PROXY: proxy.origin }, async () => {
+            _resetRegisterForTest(proxy.origin);
+            const ctx = mockCtx();
+            class Llm4894 {
+                async resolveModelInfo(): Promise<undefined> { return undefined; }
+            }
+            ctx.setModelServices(new Llm4894(), { currentSelection: () => ({ provider: "pG4894", model: "mG4894" }) });
+            apply(ctx);
+            await waitFor(() => ctx.registeredTools.length === 1, "initial attach tool registration");
+            // Seed AFTER registration settles: apply()'s inject already fired
+            // one refreshModelInfo for the global target, and its failure-
+            // shaped settle would otherwise clobber the seeded entry.
+            _setModelInfoForTest({ provider: "pS4894", model: "mS4894", contextWindow: 111 });
+            _setModelInfoForTest({ provider: "pG4894", model: "mG4894", contextWindow: 222 });
+            const hook = _nativeStateForTest().declaredWindowForDirect;
+            assert.ok(hook !== undefined, "apply() arms the direct-path window source");
+            // #2381 resolution, minus the plugin-mode gates: the session's own
+            // live header first...
+            ctx.setInitiator({ session: { id: "s4894", requestHeader: () => ({ config: { provider: "pS4894", model: "mS4894" } }) } });
+            assert.equal(hook(), 111, "session model wins over the global default");
+            // ...the host's global default as fallback...
+            ctx.setInitiator({ session: { id: "s4894" } });
+            assert.equal(hook(), 222, "global default when the session carries no header");
+            // ...and a resolvable model without cached window info → undefined
+            // (a wrong model's window is worse than none — fail open).
+            ctx.setInitiator({ session: { id: "s4894", requestHeader: () => ({ config: { provider: "pX4894", model: "mX4894" } }) } });
+            assert.equal(hook(), undefined, "unknown window fails open");
+        });
+    } finally {
+        _setModelInfoForTest();
+        proxy.close();
+        rmrf(home);
+        _resetRegisterForTest(undefined);
+    }
+});
+
+test("#4894 declaredWindowForDirect: no model services at all → undefined (fail-open)", async () => {
+    const proxy = await startMockProxy([]);
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "bili-dsh-4894b-home-"));
+    try {
+        await withEnv({ DSH_HOME: home, BILLION_CONTEXT_PROXY: proxy.origin }, async () => {
+            _resetRegisterForTest(proxy.origin);
+            const ctx = mockCtx();
+            apply(ctx);
+            await waitFor(() => ctx.registeredTools.length === 1, "initial attach tool registration");
+            const hook = _nativeStateForTest().declaredWindowForDirect;
+            assert.ok(hook !== undefined, "apply() arms the hook regardless of services");
+            assert.equal(hook(), undefined, "no services → no window source → fail-open direct sends");
+        });
+    } finally {
+        _setModelInfoForTest();
+        proxy.close();
+        rmrf(home);
         _resetRegisterForTest(undefined);
     }
 });

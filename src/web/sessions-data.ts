@@ -673,7 +673,7 @@ function livePriceForSummary(s: SummarySource): LivePrice | undefined {
  *  1/0.1/4 fill partial profiles, as before). Nothing usable → undefined:
  *  tokens only, never fabricated dollars. */
 function savedUsdProfileForSummary(s: SummarySource, live?: LivePrice): { w: number; r: number; q: number } | undefined {
-    if (live !== undefined) return { w: live.input, r: live.cacheRead, q: live.output };
+    if (live !== undefined) return { w: live.cacheWrite, r: live.cacheRead, q: live.output };
     const o = s.metadata["cachePriceProfile"];
     if (!o || typeof o !== "object" || Array.isArray(o)) return undefined;
     const rec = o as Record<string, unknown>;
@@ -920,7 +920,7 @@ function summaryOf(s: SummarySource, live: boolean): WebSessionSummary {
     const rates = usdProf !== undefined
         ? { w: usdProf.w, r: usdProf.r, q: usdProf.q }
         : livePrice !== undefined
-            ? { w: livePrice.input, r: livePrice.cacheRead, q: livePrice.output }
+            ? { w: livePrice.cacheWrite, r: livePrice.cacheRead, q: livePrice.output }
             : undefined;
     // Untitled sessions: fall back to the first compression block's topic/summary lead.
     let firstBlockHint = "";

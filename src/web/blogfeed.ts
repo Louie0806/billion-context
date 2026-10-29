@@ -40,6 +40,19 @@ let rootOverride: string | undefined;
 let probedRoot: string | undefined;
 let state: { items: BlogItem[] } | undefined;
 
+/** Defense-in-depth on EVERY blog-asset response (#4958): asset bytes can
+ *  come from GitHub master (remote overlay, #4906) and .svg is served as
+ *  image/svg+xml — DIRECTLY NAVIGATED, that is active content on the panel
+ *  origin (which also hosts the config editor and its provider API keys), so
+ *  an embedded <script> would run same-origin. `sandbox` CSP strips
+ *  script/origin powers from such a navigation; in-page <img> usage — the
+ *  only way web/markdown.ts references these — is unaffected. nosniff pins
+ *  the declared type. */
+const ASSET_SECURITY_HEADERS: Record<string, string> = {
+    "content-security-policy": "sandbox",
+    "x-content-type-options": "nosniff",
+};
+
 /** One decoded-and-typed image served from the GitHub overlay (#4906), keyed
  *  by repo-relative POSIX path (e.g. "website/blog/posts/figures/x.png"). */
 type RemoteAsset = { buf: Buffer; type: string };
@@ -512,11 +525,12 @@ function safeSegments(urlPath: string): string[] | undefined {
     return out;
 }
 
-/** GET /__bili/blog-assets/<rel> — bundled image bytes only (extension gate +
- *  traversal gate); anything else is a plain-text 404. */
+/** GET /__bili/blog-assets/<rel> — remote overlay bytes first (#4906), then
+ *  bundled disk bytes (extension gate + traversal gate); anything else is a
+ *  plain-text 404. EVERY response carries sandbox CSP + nosniff (#4958). */
 export function handleBlogAssetGet(res: ServerResponse, urlPath: string): void {
     const notFound = () => {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" });
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache", ...ASSET_SECURITY_HEADERS });
         res.end(`404 Not Found: ${urlPath}\n`);
     };
     const clean = urlPath.split(/[?#]/)[0];
@@ -534,7 +548,7 @@ export function handleBlogAssetGet(res: ServerResponse, urlPath: string): void {
     // frozen bundle bytes; a miss falls through to the package below.
     const overlaid = getRemoteBlogAsset(segments.join("/"));
     if (overlaid !== undefined) {
-        res.writeHead(200, { "content-type": overlaid.type, "cache-control": "no-cache" });
+        res.writeHead(200, { "content-type": overlaid.type, "cache-control": "no-cache", ...ASSET_SECURITY_HEADERS });
         res.end(overlaid.buf);
         return;
     }
@@ -549,6 +563,6 @@ export function handleBlogAssetGet(res: ServerResponse, urlPath: string): void {
         notFound();
         return;
     }
-    res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
+    res.writeHead(200, { "content-type": type, "cache-control": "no-cache", ...ASSET_SECURITY_HEADERS });
     res.end(readFileSync(file));
 }

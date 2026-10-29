@@ -346,7 +346,13 @@ jobs:
       # resolves it to the built dist. Same prerequisite as the main test
       # matrix (run-ci-tests pretest parity) and ci-e2e-dsh.yml.
       - run: npm --prefix kernel run build
-      - run: node --import tsx --test tests/storage-backend-contract.test.ts tests/storage-backend-knob.test.ts
+      # --test-concurrency=1: every mysql lane in these files shares ONE DSN
+      # and database; node's default file parallelism (cores-1) would let two
+      # suites race on the same tables once runners grow past 2 vCPUs.
+      # storage-backend-mysql-e2e.test.ts is deliberately NOT listed: its hot-
+      # path test fails deterministically on real MySQL (pre-existing defect,
+      # not caused by any PR in flight) — tracked in #4926; re-add it there.
+      - run: node --import tsx --test --test-concurrency=1 tests/storage-backend-contract.test.ts tests/storage-backend-knob.test.ts tests/issue4666-migration-dedup.test.ts
         env:
           BILI_MYSQL_TEST_DSN: mysql://root:bili-test-root@127.0.0.1:3306/bili
 

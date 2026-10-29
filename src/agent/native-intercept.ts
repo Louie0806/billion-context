@@ -116,6 +116,21 @@ export interface NativeInterceptState {
      *                     cannot parse it; the host's retry re-runs the full
      *                     decision (re-probe, re-plan) from scratch. */
     prepareDirectSend?: (url: string, input: string | URL | Request, init: RequestInit | undefined) => DirectSendPrep | Promise<DirectSendPrep>;
+    /** #4894: the model context window for requests that carry NO
+     *  x-bili-plugin-context-window header on their degraded direct path —
+     *  consulted by directSendOrRefuse AFTER the header lookup, at EVERY
+     *  fall-back site (not-ready, respawn give-up, unattributed direct):
+     *  the header is stamped only by the proxy branch, so a request that
+     *  finds no live proxy carries none and the shared oversize arm (#4516)
+     *  stays disarmed in exactly the state where an uncompressed egress is
+     *  most likely to blow the window (dsh slow boot past the spawn budget,
+     *  #4609 → direct-for-process-lifetime → prompt_too_long storm). Lanes
+     *  arm it with their per-request session-model resolution (the same one
+     *  their gate's oversize arm uses); it answers synchronously and may
+     *  return undefined — the arm then fails open, byte-identical to today.
+     *  A wrong model's window is worse than none: resolve per request or
+     *  stay silent. */
+    declaredWindowForDirect?: () => number | undefined;
     /** #3248 incremental turns: response hook — fired with the routed
      *  Response BEFORE it is returned to the host, so response headers are
      *  readable without consuming the stream. Native hosts use it to read
@@ -1171,18 +1186,22 @@ export function installNativeFetchIntercept(initialState: NativeInterceptState):
                 logHostEvent("error", "[native-client]", `bili-native: no usable proxy and the request carries a lane-only payload — failing locally instead of sending it to the provider; retry the turn (#3304): ${dispatchUrl}`);
                 throw new TypeError("billion-context: proxy unavailable — the request payload is lane-specific (incremental turn) and cannot be forwarded to the provider directly; retry the turn (#3304)");
             }
-            // #4516: without a live proxy the raw history rides straight to
-            // the provider — refuse LOCALLY what provably cannot fit the
-            // model's own window (declared via x-bili-plugin-context-window,
-            // stamped by every plugin lane): the upstream rejects it and every
-            // retry re-sends the same oversized history, so the turn can never
-            // succeed while the proxy stays down. No header → skip measuring
-            // entirely (the doom check is undefined by construction, and
-            // headerless lanes must not clone/buffer the body — up to 5 GiB —
-            // per degraded direct send for nothing); unreadable body / body
-            // that fits once media is excluded → fail open, exactly like the
-            // gate arms.
-            const declaredWindow = declaredWindowFromHeaders(defaultInput, init);
+            // #4516/#4894: without a live proxy the raw history rides straight
+            // to the provider — refuse LOCALLY what provably cannot fit the
+            // model's own window: the upstream rejects it and every retry
+            // re-sends the same oversized history, so the turn can never
+            // succeed while the proxy stays down. The window comes from the
+            // stamped header first (request-specific; every plugin lane stamps
+            // it on proxy-bound requests), then from the lane's per-request
+            // resolution (#4894: declaredWindowForDirect) — the header is
+            // absent on precisely the not-ready path where the proxy branch
+            // never ran, which is where an uncompressed egress most needs the
+            // guard. Neither source → skip measuring entirely (the doom check
+            // is undefined by construction, and windowless lanes must not
+            // clone/buffer the body — up to 5 GiB — per degraded direct send
+            // for nothing); unreadable body / body that fits once media is
+            // excluded → fail open, exactly like the gate arms.
+            const declaredWindow = declaredWindowFromHeaders(defaultInput, init) ?? state.declaredWindowForDirect?.();
             const measured = declaredWindow === undefined
                 ? undefined
                 : prep.outcome === "restored"

@@ -31,6 +31,7 @@ import { _resetSessionsForTest, getSession } from "../src/session.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { loadOptions } from "../src/config.ts";
 import { resolveBillingPrice, setBillingOverrides } from "../src/billing.ts";
+import { setLogCapture } from "../src/logger.ts";
 import { rmrf } from "./tmp-rm.ts";
 
 function resetState(): void {
@@ -162,6 +163,40 @@ test("#4899 pricing PUT: a broken config file still blocks every structured save
     assert.equal(put.status, 409, "guard fires before any merge, #3572 discipline preserved");
 });
 
+test("null billing prices: config load warns, clears stale overrides, and preserves the file", (t) => {
+    resetState();
+    const raw = JSON.stringify({ port: 9876, billing: { prices: null } });
+    const file = withRawConfig(t, raw);
+    setBillingOverrides({ "claude-bill": { input: 9 } });
+    const warnings: string[] = [];
+    setLogCapture((level, message) => { if (level === "warn") warnings.push(message); });
+    t.after(() => setLogCapture(null));
+
+    const options = loadOptions({});
+    assert.equal(options.port, 9876, "other config remains available");
+    assert.ok(warnings.some((message) => message.includes('ignoring invalid "billing" block')));
+    assert.equal(resolveBillingPrice("claude-bill")?.source, "registry", "invalid block cannot retain stale overrides");
+    assert.equal(readFileSync(file, "utf8"), raw, "load never rewrites invalid user configuration");
+});
+
+test("null billing prices: structured and whole-file saves reject without mutation", async (t) => {
+    resetState();
+    const raw = JSON.stringify({ billing: { prices: { "claude-bill": { input: 9 } } } });
+    const file = withRawConfig(t, raw);
+    loadOptions({});
+
+    for (const body of [
+        { billing: { prices: null } },
+        { file: JSON.stringify({ billing: { prices: null } }) },
+    ]) {
+        const result = await putConfig(body);
+        assert.equal(result.status, 400);
+        assert.match(String(result.payload.error), /invalid billing settings/);
+        assert.equal(readFileSync(file, "utf8"), raw, "rejection preserves the complete config file");
+        assert.equal(resolveBillingPrice("claude-bill")?.input, 9, "rejection preserves active overrides");
+    }
+});
+
 test("#4899 web summaries: sessions carry costUsd/savedUsd/model; overview totals aggregate USD", async () => {
     resetState();
     const priced = getSession("web-money-1", { protocol: "anthropic", upstreamOrigin: "http://api.somehost.com" });
@@ -203,13 +238,15 @@ test("#4899 web summaries: sessions carry costUsd/savedUsd/model; overview total
     assert.equal(row1!.model, "claude-bill", "model id surfaced for the pricing editor");
     assert.ok(Math.abs(row1!.costUsd!.total - (0.003 + 0.00012 + 0.000375 + 0.03)) < 1e-12, "spend total sums the ledger");
     // #4899 follow-up (live pricing): the panel prices folds at the CURRENT
-    // price table — live registry tiers {input:3, cacheRead:0.3, output:15}
-    // override the stamped {w:3.75,…} profile. Saved mirrors the kernel fold
-    // formula: (S−σ)·ra·r − [(w−r)·T + q·σ − r·S], rounded to 4 decimals at
-    // the summary boundary (display precision).
+    // price table — live registry tiers {input:3, cacheRead:0.3,
+    // cacheWrite:3.75, output:15} override the stamped {w:3.75,…} profile.
+    // Saved mirrors the kernel fold formula: (S−σ)·ra·r − [(w−r)·T + q·σ − r·S],
+    // w = the CACHE-WRITE tier (#4956: fold replay re-uploads at the write
+    // premium — same contract as kernel/src/cache-report.ts/acp_cache),
+    // rounded to 4 decimals at the summary boundary (display precision).
     const perTurn = (50000 - 5000) * 10 * 0.3; // 135000
-    const oneTime = (3 - 0.3) * 3000 + 15 * 5000 - 0.3 * 50000; // 68100
-    const expectSaved = Math.round(((perTurn - oneTime) / 1e6) * 1e4) / 1e4; // 0.0669
+    const oneTime = (3.75 - 0.3) * 3000 + 15 * 5000 - 0.3 * 50000; // 70350
+    const expectSaved = Math.round(((perTurn - oneTime) / 1e6) * 1e4) / 1e4; // 0.0647
     assert.ok(row1!.savedUsd !== undefined && Math.abs(row1!.savedUsd! - expectSaved) < 1e-9, `savedUsd ${row1!.savedUsd}`);
     // #4899 v3: payback decomposition — the split faces must be exactly the
     // one-time terms of the canonical formula, so gross − spent == savedUsd
@@ -217,7 +254,7 @@ test("#4899 web summaries: sessions carry costUsd/savedUsd/model; overview total
     const pb1 = row1!.payback;
     assert.ok(pb1 !== undefined, "priced fold session exposes payback");
     const r4 = (x: number) => Math.round(x * 1e4) / 1e4;
-    const expectReplay1 = r4(((3 - 0.3) * 3000) / 1e6);
+    const expectReplay1 = r4(((3.75 - 0.3) * 3000) / 1e6);
     const expectSigma1 = r4((15 * 5000) / 1e6);
     const expectCredit1 = r4((0.3 * 50000) / 1e6);
     const expectSpent1 = r4(expectReplay1 + expectSigma1 - expectCredit1);
@@ -252,8 +289,9 @@ test("#4899 web summaries: sessions carry costUsd/savedUsd/model; overview total
     const pb5 = row5!.payback;
     assert.ok(pb5 !== undefined, "anchored session exposes payback too");
     // v5: each priced session carries the exact tier rates its faces used
-    // (live table {3,0.3,15} beats the stamp; anchored ratio keeps q=12).
-    assert.deepEqual(row1!.rates, { w: 3, r: 0.3, q: 15 }, "live tier rates exposed");
+    // (live table {w:3.75, r:0.3, q:15} beats the stamp; anchored ratio keeps
+    // q=12). #4956: w is the cacheWrite tier, NOT input — positive pin.
+    assert.deepEqual(row1!.rates, { w: 3.75, r: 0.3, q: 15 }, "live tier rates exposed");
     assert.ok(row5!.rates && Math.abs(row5!.rates!.w - 3) < 1e-9 && Math.abs(row5!.rates!.r - 0.3) < 1e-9 && Math.abs(row5!.rates!.q - 12) < 1e-9,
         `anchored ratio rates (kernel 0.1×input → r) ${JSON.stringify(row5!.rates)}`);
     const expectSpent5 = r4(r4(((3 - 0.3) * 3000) / 1e6) + r4((12 * 5000) / 1e6) - expectCredit1);
@@ -315,8 +353,9 @@ test("#4899 legacy sessions: $ faces derive LIVE from the current price table (n
     assert.equal(row!.costUsd?.estimated, true, "live-derived spend is flagged estimated");
     assert.ok(row!.costUsd && Math.abs(row!.costUsd.total - 1.8) < 1e-12, `spend ${row!.costUsd?.total}`);
     // Folds priced at the same live tiers: perTurn=(45000)·10·0.3=135000,
-    // oneTime=(3−0.3)·3000+15·5000−0.3·50000=68100 → 0.0669.
-    assert.ok(row!.savedUsd !== undefined && Math.abs(row!.savedUsd! - 0.0669) < 1e-9, `savedUsd ${row!.savedUsd}`);
+    // oneTime=(3.75−0.3)·3000+15·5000−0.3·50000=70350 → 0.0647 (w = cacheWrite,
+    // #4956).
+    assert.ok(row!.savedUsd !== undefined && Math.abs(row!.savedUsd! - 0.0647) < 1e-9, `savedUsd ${row!.savedUsd}`);
     assert.ok(Math.abs((row!.savedUsdGross ?? 0) - 0.135) < 1e-9, `savedUsdGross ${row!.savedUsdGross}`);
     // #4899 v3: legacy sessions get the same payback view; output splits into
     // normal vs summary-generation tokens (σ of the fold = 5000).
@@ -332,7 +371,7 @@ test("#4899 legacy sessions: $ faces derive LIVE from the current price table (n
     assert.ok(cul && Math.abs(cul.i - 1.5) < 1e-9 && Math.abs(cul.r - 0.15) < 1e-9 && cul.w === 0 && Math.abs(cul.o - 0.15) < 1e-9, `legacy split ${JSON.stringify(cul)}`);
     assert.ok(ov.paybackUsdTotal && Math.abs(ov.paybackUsdTotal.turns - 10) < 1e-9 && ov.paybackUsdTotal.saved === r4(0.135 * 1), `legacy fleet payback turns=${ov.paybackUsdTotal?.turns} saved=${ov.paybackUsdTotal?.saved}`);
     // v5: a single-tier fleet prints its exact rates inside the formula lines.
-    assert.deepEqual(ov.moneyRates, { w: 3, r: 0.3, q: 15 }, "single-rate fleet exposes the triple");
+    assert.deepEqual(ov.moneyRates, { w: 3.75, r: 0.3, q: 15 }, "single-rate fleet exposes the triple");
     assert.equal(ov.foldsTotal, 1);
 
     // Editing the price table re-prices immediately (nothing was persisted).
@@ -340,7 +379,9 @@ test("#4899 legacy sessions: $ faces derive LIVE from the current price table (n
     const list2 = await buildSessionList();
     const row2 = list2.find((s) => s.id === "web-legacy-1");
     assert.ok(row2!.costUsd && Math.abs(row2!.costUsd.total - (3.0 + 0.15 + 0.15)) < 1e-12, `re-priced ${row2!.costUsd?.total}`);
-    // oneTime=(6−0.3)·3000+15·5000−0.3·50000=77100 → (135000−77100)/1e6.
+    // oneTime=(6−0.3)·3000+15·5000−0.3·50000=77100 → (135000−77100)/1e6
+    // (#4956 negative direction: the override row carries NO cacheWrite, so
+    // w follows the cache_write ?? input fallback and stays at 6).
     assert.ok(row2!.savedUsd !== undefined && Math.abs(row2!.savedUsd! - 0.0579) < 1e-9, `re-priced savedUsd ${row2!.savedUsd}`);
     // v5: the exposed rates follow the edit too — nothing frozen at stamp time.
     assert.deepEqual(row2!.rates, { w: 6, r: 0.3, q: 15 }, `re-priced rates ${JSON.stringify(row2!.rates)}`);
@@ -374,5 +415,5 @@ test("#4899 v3 payback: a fold whose one-time cost outruns its avoidance reads N
         "fleet line shows a negative net while no session has paid back");
     // v5: single-session fleet → fold count + rate triple both printable.
     assert.equal(ov.foldsTotal, 1);
-    assert.deepEqual(ov.moneyRates, { w: 3, r: 0.3, q: 15 });
+    assert.deepEqual(ov.moneyRates, { w: 3.75, r: 0.3, q: 15 });
 });

@@ -415,10 +415,15 @@ export class UnifiedStore {
             integrityOk = true;
         }
         // #4175: second-process-on-the-same-db detection. A live foreign pid
-        // is reported loudly (web wire + banner) but never blocks — blocking
-        // would brick the second lane outright; the documented posture is one
-        // #3633 instance per session directory. A dead pid means a stale
-        // lock: take it over.
+        // is surfaced (web wire + banner) but never blocks — blocking would
+        // brick the second lane outright. #5082: coexistence on one index.db
+        // is the SUPPORTED topology — SQLite WAL is multi-process safe on a
+        // local filesystem and the machine-global sessions dir is
+        // deliberately shared — so the foreign pid is informational WHATEVER
+        // lane it maps to (or none: inline lanes never register). The real
+        // hazard, two instances writing the SAME session, has its own
+        // per-session alarm (the #3923 split-brain contest). A dead pid means
+        // a stale lock: take it over.
         const lockPath = `${path}.lock`;
         let foreignLockHolder: { pid: number } | null = null;
         try {
@@ -427,22 +432,14 @@ export class UnifiedStore {
                 const pid = typeof parsed.pid === "number" ? parsed.pid : null;
                 if (pid !== null && pid !== process.pid && processAlive(pid)) {
                     foreignLockHolder = { pid };
-                    // #3923/#3959: a live foreign pid that maps to a KNOWN bili
-                    // instance of a DIFFERENT lane is the deliberate shared-directory
-                    // topology — informational, not a corruption alarm. When stale
-                    // entries share the pid (restarted instance), the newest
-                    // startedAt is the live one.
+                    // When stale entries share the pid (restarted instance),
+                    // the newest startedAt is the live one.
                     const peer = listInstances()
                         .filter((e) => e.pid === pid)
                         .reduce<RegistryEntry | undefined>((best, e) => (best === undefined || (e.startedAt ?? 0) > (best.startedAt ?? 0) ? e : best), undefined);
-                    const ownLane = process.env.BILI_LAUNCHER_LANE?.trim() || undefined;
-                    const benign = peer !== undefined && ownLane !== undefined && peer.lane !== undefined && peer.lane !== ownLane;
-                    if (benign) {
-                        loggerLog("info", `[storage] process (pid ${pid}, lane ${peer?.lane}, instance ${peer?.instanceId.slice(0, 8)}) is also using ${path} — different lanes sharing one sessions directory is the supported topology (#3923/#3959); informational only.`);
-                    } else {
-                        loggerLog("error", `[storage] another process (pid ${pid}) is already writing ${path} — two processes on one index.db corrupt it (#3923/#3959). One session dir must have exactly one instance (#3633); this lane keeps running but the condition is reported.`);
-                    }
-                    recordSecondProcessOwner(pid, { lane: peer?.lane, instanceId: peer?.instanceId, benign });
+                    const peerOf = peer !== undefined ? ` (lane ${peer.lane ?? "?"}, instance ${peer.instanceId.slice(0, 8)})` : "";
+                    loggerLog("info", `[storage] process pid ${pid}${peerOf} is also using ${path} — multiple instances sharing one sessions dir is the supported topology (#5082/#3923); two instances writing the SAME session alarm separately (split-brain contest)`);
+                    recordSecondProcessOwner(pid, { lane: peer?.lane, instanceId: peer?.instanceId, benign: true });
                 }
             }
             writeFileSync(lockPath, JSON.stringify({ pid: process.pid, boot: Date.now() }));
@@ -792,6 +789,8 @@ export class UnifiedStore {
                     }
                 }
             }
+            // Lineage belongs to the first parent, including its nullable fork
+            // point. Later metadata must not reparent or mix the stored pair.
             this.db
                 .prepare(
                     `INSERT INTO sessions (session_id, parent_session_id, fork_point_seq, protocol, label, title, host_title, namespace, origin,
@@ -801,8 +800,8 @@ export class UnifiedStore {
                        @status, @createdAt, @updatedAt, @nextBlockId, @nextRunId,
                        @metaJson, @statsJson, @metadataJson, @kstateJson, @tailJson, @ccrJson, @lastIngestedSeq, @orphansJson)
                      ON CONFLICT(session_id) DO UPDATE SET
-                       parent_session_id = COALESCE(excluded.parent_session_id, sessions.parent_session_id),
-                       fork_point_seq = COALESCE(excluded.fork_point_seq, sessions.fork_point_seq),
+                       parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
+                       fork_point_seq = CASE WHEN sessions.parent_session_id IS NULL THEN excluded.fork_point_seq ELSE sessions.fork_point_seq END,
                        protocol = excluded.protocol,
                        label = excluded.label,
                        title = excluded.title,
@@ -2089,7 +2088,10 @@ export class UnifiedStore {
             return fail("sessions.kstate_json", "must not carry nextBlockId/nextRunId (columns own them)");
         }
 
-        const messages = this.getMessages(sessionId);
+        // #4666: retired rows carry the same projections (tombstone-only) —
+        // verifying them too closes the diagnostic gap where corruption on a
+        // retired row was invisible.
+        const messages = this.getMessages(sessionId, { includeRetired: true });
         const refByRaw = new Map(this.getRefs(sessionId).map((r) => [r.rawId, r.ref]));
         for (const m of messages) {
             checks++;
@@ -2371,19 +2373,37 @@ export class UnifiedStore {
      *  throughSeq is inclusive (store seq is 0-based; the endpoint passes the
      *  parent's last live seq — #4730). Returns false when the parent session
      *  has no row (never mirrored — nothing to clone), true otherwise
-     *  (including zero-row clones and idempotent replays). */
-    cloneSessionRows(parentId: string, childId: string, throughSeq: number): boolean {
-        if (this.getSessionRow(parentId) === null) return false;
-        this.db.transaction(() => {
-            const parent = this.getSessionRow(parentId);
-            if (parent === null) return;
+     *  (including zero-row clones and idempotent replays). With initial, the
+     *  child must be new and its snapshot is ingested in this same transaction,
+     *  so neither ledger rows nor a half-initialized child survive failure.
+     *  An unmirrored parent with initial still creates that snapshot and
+     *  returns true, without inventing ledger lineage or copied rows. */
+    cloneSessionRows(parentId: string, childId: string, throughSeq: number, initial?: IngestSessionInput): boolean {
+        if (initial && initial.session.sessionId !== childId) throw new Error("cloneSessionRows: initial session does not match child");
+        if (parentId === childId) throw new Error("cloneSessionRows: conflicting fork lineage (child equals parent)");
+        return this.db.transaction(() => {
             const existing = this.getSessionRow(childId);
+            if (initial && existing !== null) throw new Error("cloneSessionRows: conflicting fork lineage (child already exists)");
+            const parent = this.getSessionRow(parentId);
+            if (parent === null) {
+                // A legacy-only parent has no ledger to clone. Still create
+                // the prepared child atomically rather than falling back to
+                // an unchecked upsert after releasing this transaction.
+                if (!initial) return false;
+                if (!this.ingestSession(initial, undefined, { completeLog: true })) throw new Error("cloneSessionRows: initial child ingest failed");
+                return true;
+            }
             if (existing !== null) {
-                // Idempotent replay — never duplicate rows on a retried fork.
+                // The pair, not the presence of messages, identifies a replay.
+                // Empty clones are completed clones too; never reparent them.
+                if (existing.parentSessionId !== null || existing.forkPointSeq !== null) {
+                    if (existing.parentSessionId === parentId && existing.forkPointSeq === throughSeq) return true;
+                    throw new Error("cloneSessionRows: conflicting fork lineage");
+                }
                 const already = this.db
                     .prepare("SELECT COUNT(*) AS n FROM messages WHERE session_id = ?")
                     .get(childId) as Record<string, unknown>;
-                if ((already.n as number) > 0) return;
+                if ((already.n as number) > 0) throw new Error("cloneSessionRows: conflicting fork lineage (child already has messages)");
             }
             this.db
                 .prepare(
@@ -2432,8 +2452,9 @@ export class UnifiedStore {
                     parentId,
                     throughSeq,
                 );
+            if (initial && !this.ingestSession(initial, undefined, { completeLog: true })) throw new Error("cloneSessionRows: initial child ingest failed");
+            return true;
         });
-        return true;
     }
 
     private putContentRef(hash: string): void {
