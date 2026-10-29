@@ -198,6 +198,59 @@ describe("#5142 expected-rebase accounting", () => {
         assert.ok(w3 < w2 / 2, `steady-state pass ${w3} not far below the classification pass ${w2}`);
     });
 
+    test("T2b slot-pairing hard gates: image-bearing / role-mismatched replacements stay in drift (#3617 negative)", () => {
+        const mkStore = (ids: string[]) => {
+            const storeRows: Record<string, Array<{ seq: number; msgId: string; content: string }>> = {};
+            for (const id of ids) {
+                storeRows[id] = [{
+                    seq: 1,
+                    msgId: id,
+                    content: JSON.stringify({
+                        id, role: "user", contentType: "text", text: "[image]",
+                        rawAnthropicBlock: { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJDREVG" } },
+                    }),
+                }];
+            }
+            return (listed: readonly string[]) => listed.flatMap((id) => storeRows[id] ?? []);
+        };
+        // Gate !storedMessageCarriesImage(replacement): a replacement cell that
+        // ITSELF carries an image is not an offload landing — the matcher must
+        // fail safe and keep the id in drift accounting, alarm included.
+        {
+            const { session, block, logs, opts } = harness("dsh");
+            const img = makeMsg("user", "[image]");
+            const rest = baseHistory(20);
+            const history = [img, ...rest];
+            block.effectiveMessageIds.push(...history.map((m) => m.id!));
+            const fullOpts = { ...opts, storedRowLookup: mkStore([img.id!]) };
+            reconcileFoldCoverage(session, history, fullOpts);
+            const imgCell = { id: "rep-img", role: "user" as const, contentType: "text" as const, text: "alt", rawAnthropicBlock: { type: "image", source: { type: "base64", media_type: "image/png", data: "WFg=" } } } as CoreMessage;
+            reconcileFoldCoverage(session, [imgCell, ...rest], fullOpts);
+            assert.equal(recordOf(session)?.[img.id!], undefined, "image-bearing replacement must not classify as offload");
+            assert.ok(!logs.some(([, m]) => m.includes("retired by expected host behavior")), "no expected-rebase line for a mis-gated pair");
+            assert.ok(
+                logs.some(([lvl, m]) => lvl === "warn" && m.includes("resent history drifted"))
+                || logs.some(([, m]) => m.includes("truncation/dropped history") || m.includes("rewind/undo")),
+                "the genuine-loss alarm must stay live (no masking)",
+            );
+        }
+        // Gate anchor.role === replacement.role: a role-mismatched replacement
+        // at the same index is not the offlanded text of this image.
+        {
+            const { session, block, logs, opts } = harness("dsh");
+            const img = makeMsg("user", "[image]");
+            const rest = baseHistory(20);
+            const history = [img, ...rest];
+            block.effectiveMessageIds.push(...history.map((m) => m.id!));
+            const fullOpts = { ...opts, storedRowLookup: mkStore([img.id!]) };
+            reconcileFoldCoverage(session, history, fullOpts);
+            const roleCell = makeMsg("assistant", "Figure uploaded to files; see attached reference.");
+            reconcileFoldCoverage(session, [roleCell, ...rest], fullOpts);
+            assert.equal(recordOf(session)?.[img.id!], undefined, "role-mismatched replacement must not classify as offload");
+            assert.ok(!logs.some(([, m]) => m.includes("retired by expected host behavior")), "no expected-rebase line for a mis-gated pair");
+        }
+    });
+
     test("T3a real head truncation still alarms — no expected-rebase masking (#3617 negative)", () => {
         const { session, block, logs, opts } = harness("dsh");
         const history = baseHistory(40);
