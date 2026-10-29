@@ -1855,7 +1855,13 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
                     if (hasImageMarker) { offloadPending[id] = 1; continue; }
                     tried[id] = 1;
                 }
-                session.metadata[METADATA_REBASE_FETCH_TRIED] = pruneRebaseMemo(tried);
+                const prunedTried = pruneRebaseMemo(tried);
+                // #5142: never persist EMPTY memos — an empty record written
+                // into session metadata changes the persisted-state digest of
+                // every session (golden-storage-render pins that byte-for-byte)
+                // without carrying any information.
+                if (Object.keys(prunedTried).length > 0) session.metadata[METADATA_REBASE_FETCH_TRIED] = prunedTried;
+                else delete session.metadata[METADATA_REBASE_FETCH_TRIED];
             }
         }
     }
@@ -1883,8 +1889,13 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             delete offloadPending[id];
         }
     }
-    session.metadata[METADATA_OFFLOAD_PENDING] = pruneRebaseMemo(offloadPending);
-    session.metadata[METADATA_EXPECTED_REBASE] = expected;
+    // Same empty-memo discipline as the tried-memo above (#5142): keys enter
+    // persisted state only while they carry entries.
+    const prunedPending = pruneRebaseMemo(offloadPending);
+    if (Object.keys(prunedPending).length > 0) session.metadata[METADATA_OFFLOAD_PENDING] = prunedPending;
+    else delete session.metadata[METADATA_OFFLOAD_PENDING];
+    if (Object.keys(expected).length > 0) session.metadata[METADATA_EXPECTED_REBASE] = expected;
+    else delete session.metadata[METADATA_EXPECTED_REBASE];
     expectedSize = Object.keys(expected).length;
 
     // Seed/refresh anchors for covered ids present in this pass (including
