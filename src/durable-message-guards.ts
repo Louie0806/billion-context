@@ -45,6 +45,16 @@
 // such contract. The kernel stays host-agnostic: it only knows virtual paths
 // and patterns.
 //
+// #5142 second role — DRIFT ACCOUNTING (not protection): some carriers are
+// deliberately foldable AND permanently retired by their host after use
+// (the per-turn time-context notice; superseded durable instances under the
+// latest-per-identity policy). Once folded they leave the resent history
+// forever, which fold-reconcile used to count as "drift" on every later
+// turn — the O(full-history) tax of #5139. oneShotCarrierPaths below exposes
+// the same evidence-backed classifiers to that accounting surface ONLY:
+// their matches are recorded as expected rebases (excluded from drift),
+// never pinned in the kernel.
+//
 // #2766 ROLE BOUNDARY: every carrier is a host INJECTION into the user
 // channel — no classifier may project an assistant-role message. Model
 // output echoes these markers (anything visible to the model eventually
@@ -217,3 +227,33 @@ export function withDurableProtection(config: Config, classifier: DurableMessage
     }
     return { ...config, protectedLatestTools: [...(config.protectedLatestTools ?? []), "durable/*"], messagePathOf: classifier };
 }
+
+/** #5142: lane → ONE-SHOT carrier classifier for FOLD-DRIFT ACCOUNTING only
+ *  (fold-reconcile's expected-rebase record). Deliberately separate from
+ *  durableMessageToolPaths: these carriers stay kernel-foldable (lean
+ *  context) but are PERMANENTLY retired by their host after use — superseded
+ *  durable instances under the latest-per-identity policy included (a folded
+ *  old skill-catalog snapshot never comes back either). Their absence from
+ *  later resends is expected host behavior, accounted out of drift, NEVER
+ *  pinned. Same KDD #9 discipline: per-host entries with traffic evidence. */
+export const oneShotCarrierPaths: Record<string, DurableMessageClassifier> = {
+    dsh: (msg) =>
+        dshSkillCatalogPath(msg) ??
+        dshWorkspaceInstructionsPath(msg) ??
+        dshRuntimeContextPath(msg) ??
+        dshMcpCatalogPath(msg) ??
+        dshTimeContextPath(msg),
+};
+
+/** #5142: raw-content pre-filter markers for the stored-row backfill — the
+ *  exact marker strings of the five dsh classifiers above, so a unified-store
+ *  row can be screened with cheap substring checks BEFORE JSON.parse (rows
+ *  may carry megabytes of base64 media). Lockstep with the classifiers is
+ *  enforced in tests/issue5142-expected-rebase.test.ts. */
+export const dshCarrierRawMarkers: readonly string[] = [
+    "\x3cavailable_skills\x3e",
+    "Instructions from:",
+    "Current runtime context",
+    "\x3cmcp_catalog\x3e",
+    "Time sampled while preparing turn",
+];
