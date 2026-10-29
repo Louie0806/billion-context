@@ -276,12 +276,6 @@ export const METADATA_EXPECTED_REBASE = "foldExpectedRebase";
 /** #5142: one-per-episode info latch for the expected-rebase accounting line
  *  (cleared with the drift state on recovery, like the #3641 benign latches). */
 const METADATA_EXPECTED_REBASE_NOTED = "foldExpectedRebaseNoted";
-/** #5142: stored-row fetch memo — ids whose unified-store row was read and
- *  carried NEITHER carrier NOR image evidence (negative result; stable — the
- *  row of folded-out history does not change later). Same tried-once
- *  discipline as #3301's foldStoredTried; an UNAVAILABLE index is never
- *  marked (it may appear later). */
-const METADATA_REBASE_FETCH_TRIED = "foldRebaseFetchTried";
 /** #5142: stored rows showed inline image bytes but the same-position
  *  plain-text pairing had not aligned yet (array count/order churn broke the
  *  slot this pass) — retried on later passes until paired or the id returns
@@ -1678,10 +1672,10 @@ export interface ReconcileOptions {
     /** #5142: raw unified-store row source for the expected-rebase backfill —
      *  the ORIGINAL bytes of missing covered ids (carrier classification,
      *  inline-image evidence) for ids folded out before this feature existed.
-     *  Returns [] when the index has none of them, null when unavailable
-     *  (retry next pass; never marked tried). Invoked only on drift passes
-     *  with unfetched ids (≤256/pass, tried-once memo); undefined = legacy
-     *  mode, channels 2+3 stay silent. */
+      *  Returns [] when the index has none of them, null when unavailable
+      *  (re-checked on the next drift pass — negative results are never
+      *  persisted, see the channel-2 note). Invoked only on drift passes
+      *  (≤256 ids/pass); undefined = legacy mode, channels 2+3 stay silent. */
     storedRowLookup?: (msgIds: readonly string[]) => Array<{ seq: number; msgId: string; content: string }> | null;
 }
 
@@ -1807,9 +1801,15 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
     // #5142 channels 2+3 — stored-byte evidence (drift passes only).
     // Channel 2 backfills UPGRADE RESIDUE: ids folded out before this feature
     // existed never passed through channel 1, so their original bytes come
-    // from the unified index — one bounded read per pass (≤256 rows),
-    // tried-once memo (the #3301 discipline; an unavailable index is never
-    // marked). Carrier matches are lane-gated (KDD #9); the image-offload
+    // from the unified index — one bounded indexed read per drift pass
+    // (≤256 rows). NEGATIVE results are deliberately NOT memoized in
+    // persisted state: whether a row is visible is storage-MODE-dependent
+    // (the legacy tier has no unified rows), so persisting "checked, no
+    // marker" would make the same session's persisted state diverge between
+    // modes — the storage-invisibility contract that
+    // tests/storage-engine-proofs pins. The re-check cost is the same bounded
+    // read; an unavailable index simply yields nothing this pass. Carrier
+    // matches are lane-gated (KDD #9); the image-offload
     // channel is lane-agnostic STRUCTURAL evidence: the OLD cell carried
     // inline image bytes (any known projection shape) and the SAME position
     // now holds a plain-text message. Exact-index equality = array
@@ -1819,10 +1819,9 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
     // index also qualifies: benign either way (info vs warn; no claim logic).
     let offloadPending = (session.metadata[METADATA_OFFLOAD_PENDING] as Record<string, number> | undefined) ?? {};
     if (plan.unmatched.length > 0 && opts.storedRowLookup !== undefined) {
-        const tried = (session.metadata[METADATA_REBASE_FETCH_TRIED] as Record<string, number> | undefined) ?? {};
         const needed: string[] = [];
         for (const id of plan.unmatched) {
-            if (expected[id] !== undefined || offloadPending[id] !== undefined || tried[id] !== undefined) continue;
+            if (expected[id] !== undefined || offloadPending[id] !== undefined) continue;
             needed.push(id);
             if (needed.length >= MAX_REBASE_LOOKUP_PER_PASS) break;
         }
@@ -1837,7 +1836,7 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
                 }
                 for (const id of needed) {
                     const hit = best.get(id);
-                    if (hit === undefined) { tried[id] = 1; continue; } // stable absence
+                    if (hit === undefined) continue; // stable absence — re-checked next drift pass (bounded read)
                     const content = hit.content;
                     const hasImageMarker = (content.includes("\"rawAnthropicBlock\"") && content.includes("\"type\":\"image\""))
                         || content.includes("\"imageBase64\":\"")
@@ -1846,22 +1845,14 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
                     const hasCarrierMarker = classifyCarrier !== undefined && dshCarrierRawMarkers.some((mk) => content.includes(mk));
                     if (hasCarrierMarker) {
                         let parsed: unknown;
-                        try { parsed = JSON.parse(content); } catch { tried[id] = 1; continue; }
+                        try { parsed = JSON.parse(content); } catch { continue; }
                         if (typeof parsed === "object" && parsed !== null) {
                             const path = classifyCarrier(parsed as CoreMessage);
                             if (path !== undefined) { expected[id] = path; continue; }
                         }
                     }
-                    if (hasImageMarker) { offloadPending[id] = 1; continue; }
-                    tried[id] = 1;
+                    if (hasImageMarker) offloadPending[id] = 1;
                 }
-                const prunedTried = pruneRebaseMemo(tried);
-                // #5142: never persist EMPTY memos — an empty record written
-                // into session metadata changes the persisted-state digest of
-                // every session (golden-storage-render pins that byte-for-byte)
-                // without carrying any information.
-                if (Object.keys(prunedTried).length > 0) session.metadata[METADATA_REBASE_FETCH_TRIED] = prunedTried;
-                else delete session.metadata[METADATA_REBASE_FETCH_TRIED];
             }
         }
     }
@@ -1889,8 +1880,10 @@ export function reconcileFoldCoverage(session: Session, msgs: CoreMessage[], opt
             delete offloadPending[id];
         }
     }
-    // Same empty-memo discipline as the tried-memo above (#5142): keys enter
-    // persisted state only while they carry entries.
+    // Never persist EMPTY memos (#5142): an empty record written into session
+    // metadata changes the persisted-state digest of every session (pinned
+    // byte-for-byte by tests/golden-storage-render) without carrying any
+    // information.
     const prunedPending = pruneRebaseMemo(offloadPending);
     if (Object.keys(prunedPending).length > 0) session.metadata[METADATA_OFFLOAD_PENDING] = prunedPending;
     else delete session.metadata[METADATA_OFFLOAD_PENDING];
