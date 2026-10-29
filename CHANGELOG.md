@@ -13,6 +13,13 @@ Versions follow the merge of a `*_release-v*` branch; CI publishes to npm on tag
 
 ### Added
 
+### #5079 — `prompt_cache_key` 自注入默认关闭,`promptCache.routing` 一个开关管住两条 wire
+
+- **行为变更(旧→新)**:此前 bili 在插件车道对一切目的地默认给请求体盖 `prompt_cache_key=<会话 id>`(#2218/#2649 定案,Responses wire 仅对 `api.openai.com` 注入)。由于大量服务见到该字段会直接拒绝、且这类服务无法枚举,**默认反转为关闭**:`promptCache.routing` 缺省值从 `"auto"` 变为 `"disabled"`(无法识别的值同样落到 `"disabled"`)。客户端自带的 key 不受影响:任何模式下都原样转发(A/B 探测记忆对已证实拒收的 origin+model 组合照常撤键)。
+- **单一开关**:`promptCache.routing`(env `ACP_PROMPT_CACHE_ROUTING`,或 Web UI 快速配置下拉)现在同时管住两条 wire 上 bili 的自注入——chat wire 插件车道请求体盖章 + Responses wire key 注入。`"disabled"`(新默认)= 从不写自己的 key;`"auto"` = #5079 之前的行为;`"enabled"` = 所有支持的车道都盖/注(Responses wire 任意 host)。插件车道上等于绑定会话 id 的请求体 key 是 bili 自己机制的回显(dsh `PI_CACHE_RETENTION=long` 栈等),按自注入处理;Responses wire 同理(显式 key = 会话 id 且身份未被提升时算 bili 打的)。
+- **升级提示**:运行 `"disabled"` 的实例展示一次性提示 —— Web 面板横幅(可关闭,按实例持久化)、`acp_status` 一行、启动日志一行 —— 点名中转站(workbuddy panel/hub 类)/号池场景应设回 `"auto"` 或 `"enabled"` 以维持前缀缓存亲和,直连官方 API 用户忽略即可。
+- Web UI 快速配置新增 `promptCache.routing` 下拉(disabled/auto/enabled),保存即热生效。
+
 ### D5-5 — 渲染源窗口化 + 判官 tailStart 视图域修复
 
 - **渲染分窗(storage-review D5-5)**:`buildView` 不再全表加载正史行(数万行 × 每行媒体水合 = 每请求读放大)。新两层查询:`messageIdRows`(seq+msg_id 列,无字节,全行,驱动块锡定+接缝链)+ `uncoveredRows`(仅覆盖区间外的行取字节+媒体;covered 字节永不读——covered 行腐败不再导致渲染降级)。块锡定从字节匹配改 `msg_id` 列匹配零语义变化;两查询间隙新行的竞态→一次全量回退兼音。`unifiedTailViewRows` 保留为回退路径。
