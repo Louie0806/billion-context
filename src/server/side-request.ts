@@ -174,7 +174,7 @@ export function isDshAutoReviewRequest(protocol: string | null, parsed: unknown)
     return users === 1 && userHasContent;
 }
 
-// #5136: Claude Code's session-title sidecar (terminal CLI, proxy mode — no
+// #5135: Claude Code's session-title sidecar (terminal CLI, proxy mode — no
 // x-bili-plugin stamp). It fires at session start UNDER THE SAME
 // x-claude-code-session-id as the first main turn, ~1ms ahead of it. Field
 // shape (0.1.209, three machines): a single user message wrapping the first

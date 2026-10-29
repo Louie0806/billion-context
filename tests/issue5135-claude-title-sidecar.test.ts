@@ -12,7 +12,7 @@ import type { ProxyOptions } from "../src/config.ts";
 import { _setForTest as setRegistryForTest } from "../src/registry.ts";
 import { CLAUDE_CODE_TITLE_SESSION_TAG, isClaudeCodeTitleRequest } from "../src/server/side-request.ts";
 
-// #5136: Claude Code CLI's session-title sidecar (proxy mode, header-less)
+// #5135: Claude Code CLI's session-title sidecar (proxy mode, header-less)
 // fires at session start UNDER THE SAME x-claude-code-session-id as the first
 // main turn, ~1ms ahead of it. Field shape (0.1.209, three machines): a single
 // user message wrapping the first prompt in \x3csession\x3e…\x3c/session\x3e,
@@ -168,7 +168,7 @@ test("isClaudeCodeTitleRequest truth table: positive shapes match, every veto ho
     assert.equal(isClaudeCodeTitleRequest("anthropic", null), false, "non-object body");
 });
 
-test("#5136 race: title call FIRST — the main conversation keeps the raw key", async () => {
+test("#5135 race: title call FIRST — the main conversation keeps the raw key", async () => {
     freshState();
     const SESSION = randomUUID();
     const ccHeaders = ccHeadersFor(SESSION);
@@ -194,7 +194,7 @@ test("#5136 race: title call FIRST — the main conversation keeps the raw key",
     }
 });
 
-test("#5136 race: main turn FIRST — the later title call stays transparent", async () => {
+test("#5135 race: main turn FIRST — the later title call stays transparent", async () => {
     freshState();
     const SESSION = randomUUID();
     const ccHeaders = ccHeadersFor(SESSION);
@@ -215,7 +215,7 @@ test("#5136 race: main turn FIRST — the later title call stays transparent", a
     }
 });
 
-test("#5136 gate: the same shape from a non-claude-code client is NOT exempted", async () => {
+test("#5135 gate: the same shape from a non-claude-code client is NOT exempted", async () => {
     freshState();
     const SESSION = randomUUID();
     const upstream = startMockUpstream();

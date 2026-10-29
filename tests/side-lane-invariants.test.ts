@@ -314,7 +314,7 @@ test("(F) extracted protocol modules keep the side-lane boundary (#1440 P2 cut 2
 // (no threshold, no session state) consulted only to set sideIntent. #4438
 // adds isDshAutoReviewRequest — same category again: a pure dsh auto-review
 // shape predicate (no threshold, no session state) consulted to set sideIntent
-// and to keep stamped reviews off the |sub: fork path. #5136 adds
+// and to keep stamped reviews off the |sub: fork path. #5135 adds
 // isClaudeCodeTitleRequest — same category once more: a pure claude-code
 // title-sidecar shape predicate consulted to set sideIntent and to keep the
 // title call out of the #4774 raw-key anchor race.
@@ -509,7 +509,7 @@ test("(L) #4352 anthropic persona gate is side-vetoed: side shape stays verbatim
     }
 });
 
-// (#5136): the claude code session-title sidecar (terminal CLI, proxy mode,
+// (#5135): the claude code session-title sidecar (terminal CLI, proxy mode,
 // header-less) fires ~1ms ahead of the first main turn under the SAME
 // x-claude-code-session-id. Pre-fix it claimed the raw-key anchor in the #4774
 // order resolver and the main conversation forked onto |sub:<fp> for the
@@ -517,7 +517,7 @@ test("(L) #4352 anthropic persona gate is side-vetoed: side shape stays verbatim
 // per #2170 discipline: positive rows (title shape rides verbatim + passthrough
 // in BOTH arrival orders) and negative rows (tools present / missing wrapper /
 // non-CC client evidence → full pipeline, counted).
-test("(M) #5136 claude-code title sidecar: no anchor claim in either arrival order", async () => {
+test("(M) #5135 claude-code title sidecar: no anchor claim in either arrival order", async () => {
     const h = await harness();
     try {
         const MAIN_SYS = "You are Claude Code, Anthropic's official CLI for Claude. You are an interactive agent.";

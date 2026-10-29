@@ -999,7 +999,7 @@ async function handleRequest(
         // proxy-mode traffic never reaches it because the plugin header gate
         // fails first).
         const sideAgent = pluginRequestAgentHeader(req.headers);
-        // #5136: claude code session-title sidecar (proxy mode, header-less):
+        // #5135: claude code session-title sidecar (proxy mode, header-less):
         // fires ~1ms ahead of the first main turn under the SAME
         // x-claude-code-session-id. Recognize it by shape so it neither claims
         // the raw-key anchor in the #4774 order resolver (side requests resolve
@@ -1027,7 +1027,7 @@ async function handleRequest(
                  // incident topology.
                  || (pluginAgentHeader(req.headers) === "dsh" && sideAgent !== "main"
                      && isDshAutoReviewRequest(protocol, parsed))
-                 // #5136: the claude code title sidecar stays off the raw-key
+                 // #5135: the claude code title sidecar stays off the raw-key
                  // anchor claim and off the kernel pipeline entirely.
                  || ccTitleSidecar
                  || (pluginAgentHeader(req.headers) !== undefined && sideAgent !== "main"
@@ -2120,7 +2120,7 @@ async function handleRequest(
         const dshReviewSidecar = requestAgent !== "main" && isDshAutoReviewRequest(protocol, parsed)
             && (pluginAgentHeader(req.headers) === "dsh"
                 || (typeof session.metadata.pluginAgent === "string" && session.metadata.pluginAgent === "dsh"));
-        // #5136: ccTitleSidecar joins the intent set so the title call rides
+        // #5135: ccTitleSidecar joins the intent set so the title call rides
         // the #388 passthrough (kernel state untouched) like every other
         // recognized side request.
         const sideIntent = isSideRequest(parsed, requestAgent) || dshTitleSidecar || dshReviewSidecar || ccTitleSidecar;
@@ -2147,7 +2147,7 @@ async function handleRequest(
         // #2500 server-tool utility shape) diverts under a receipt.
         // #2170 measure 1: the decision itself is resolveSideLane() (pure,
         // truth-table-tested); demotedSide ⊆ lane==="side" by construction.
-        const sideLane = resolveSideLane({ countTokens, responsesCompact, protocol, stripApplied: demotedSide, sideIntent, requestAgent, sideLabel: serverToolUtility ? "server-tool utility call (#2500)" : dshTitleSidecar ? "dsh title-gen sidecar (#2503)" : dshReviewSidecar ? "dsh auto-review sidecar (#4438)" : ccTitleSidecar ? "claude-code title-gen sidecar (#5136)" : undefined });
+        const sideLane = resolveSideLane({ countTokens, responsesCompact, protocol, stripApplied: demotedSide, sideIntent, requestAgent, sideLabel: serverToolUtility ? "server-tool utility call (#2500)" : dshTitleSidecar ? "dsh title-gen sidecar (#2503)" : dshReviewSidecar ? "dsh auto-review sidecar (#4438)" : ccTitleSidecar ? "claude-code title-gen sidecar (#5135)" : undefined });
         if (sideLane.lane === "side") {
             // #554: the passthrough below skips EVERY input-side guard by design
             // (#388) — a full-history side request over the window is a
