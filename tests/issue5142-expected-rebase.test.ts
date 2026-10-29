@@ -8,7 +8,7 @@ import {
     positionalFingerprintWorkCount,
     METADATA_EXPECTED_REBASE,
 } from "../src/fold-reconcile.ts";
-import { dshTimeContextPath, oneShotCarrierPaths, dshCarrierRawMarkers } from "../src/durable-message-guards.ts";
+import { dshPastedImagePath, dshTimeContextPath, dshToolJobNoticePath, oneShotCarrierPaths, dshCarrierRawMarkers } from "../src/durable-message-guards.ts";
 import type { CoreMessage } from "acp-kernel";
 import type { Session } from "../src/session.ts";
 
@@ -67,6 +67,20 @@ function recordOf(session: Session): Record<string, string> | undefined {
     return (session.metadata as Record<string, unknown>)[METADATA_EXPECTED_REBASE] as Record<string, string> | undefined;
 }
 
+// All three evidence-backed dsh one-shot families (#5142 reporter samples,
+// personal paths redacted to synthetic values) rotated across turns so the
+// perf pin exercises every C1 channel.
+function oneShotCarrierText(t: number): string {
+    switch (t % 3) {
+        case 0:
+            return `background job bash-${(0xabc0de00 + t).toString(16)} (bash: "echo done ${t}") finished [status: completed, exit code: 0]. Read its output with job_output.`;
+        case 1:
+            return `\x3cpath\x3epaste_${t}.png\x3c/path\x3e\n\x3ctype\x3eimage\x3c/type\x3e\n\x3ccontent\x3e\nimage/png image, 640x480 px, ${10000 + t} bytes\n\x3c/content\x3e`;
+        default:
+            return `Time sampled while preparing turn ${t}, step 1: 2026-10-29T12:${String(t % 60).padStart(2, "0")}:00Z`;
+    }
+}
+
 /**
  * 40-turn mega-session scenario. Every 5th turn a fold covers the recent span
  * INCLUDING that turn's one-shot carrier (when present), so the carrier is
@@ -89,9 +103,7 @@ function runCarrierScenario(withCarriers: boolean): {
     const works: number[] = [];
     const TURNS = 40;
     for (let t = 1; t <= TURNS; t++) {
-        const carrier = withCarriers
-            ? makeMsg("user", `Time sampled while preparing turn ${t}, step 1: 2026-10-29T12:${String(t % 60).padStart(2, "0")}:00Z`)
-            : undefined;
+        const carrier = withCarriers ? makeMsg("user", oneShotCarrierText(t)) : undefined;
         history.push(makeMsg("assistant", `${history.length}: reply ${t} ${FILLER.repeat(2)}`));
         history.push(makeMsg("user", `${history.length}: question ${t} ${FILLER.repeat(2)}`));
         const wire = [...history, ...(carrier === undefined ? [] : [carrier])];
@@ -251,6 +263,32 @@ describe("#5142 expected-rebase accounting", () => {
         }
     });
 
+    test("T2c production offload placeholder format pairs through C3 (reporter sample shape)", () => {
+        const { session, block, logs, opts } = harness("dsh");
+        const img = makeMsg("user", "[image]");
+        const history = [img, ...baseHistory(34)];
+        block.effectiveMessageIds.push(...history.map((m) => m.id!));
+        const storedRowLookup = (ids: readonly string[]) => ids.filter((id) => id === img.id!).map((id) => ({
+            seq: 1,
+            msgId: id,
+            content: JSON.stringify({
+                id, role: "user", contentType: "text", text: "[image]",
+                rawAnthropicBlock: { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJDREVG" } },
+                imageBase64: "QUJDREVG", imageMediaType: "image/png",
+            }),
+        }));
+        const fullOpts = { ...opts, storedRowLookup };
+        reconcileFoldCoverage(session, history, fullOpts);
+        // The exact @deepseek-ai/dsh-llm offloadedImageText output shape from
+        // the #5142 reporter sample (personal path redacted to synthetic):
+        const placeholder = makeMsg("user", '[image omitted to fit request image limits; "spawn_preview.png" (sha256:2e896b95dec003df). Normalized copy (read-only; may be resized or re-encoded): "normalized/spawn_preview.png" (1600x900px, image/png). Source dimensions, format, and byte size may differ. Copy to a writable path ending in .png before editing.]');
+        const wire2 = [placeholder, ...history.slice(1)];
+        const r = reconcileFoldCoverage(session, wire2, fullOpts);
+        assert.equal(recordOf(session)?.[img.id!], "image-offload", "the production placeholder must pair structurally at its slot");
+        assert.ok(!logs.some(([, m]) => m.includes("resent history drifted")), "production offload must not read as drift");
+        assert.equal(r.expectedRetired, 1);
+    });
+
     test("T3a real head truncation still alarms — no expected-rebase masking (#3617 negative)", () => {
         const { session, block, logs, opts } = harness("dsh");
         const history = baseHistory(40);
@@ -337,10 +375,26 @@ describe("#5142 carrier classifier units", () => {
         assert.equal(dshTimeContextPath(tool), undefined);
     });
 
+    test("dshPastedImagePath / dshToolJobNoticePath: positives, role negatives, near-miss negatives", () => {
+        const mk = (role: CoreMessage["role"], text: string): CoreMessage =>
+            ({ id: "u", role, contentType: "text", text }) as CoreMessage;
+        // ptc-mode production shape (#5142 reporter sample, path redacted):
+        const ptc = "\x3cpath\x3espawn_preview.png\x3c/path\x3e\n\x3ctype\x3eimage\x3c/type\x3e\n\x3ccontent\x3e\nimage/png image, 1600x900 px, 1722627 bytes\n\x3c/content\x3e";
+        assert.equal(dshPastedImagePath(mk("user", ptc)), "oneshot/ptc-image");
+        assert.equal(dshPastedImagePath(mk("assistant", ptc)), undefined, "assistant echo must never classify (#2766)");
+        assert.equal(dshPastedImagePath(mk("user", "\x3cpath\x3ex.png\x3c/path\x3e without an image block")), undefined, "path tag alone is not a paste carrier");
+        // tool-jobs notice production shape (#5142 reporter sample, command redacted):
+        const job = 'background job bash-abc123 (bash: "echo ok") finished [status: completed, exit code: 0]. Read its output with job_output.';
+        assert.equal(dshToolJobNoticePath(mk("user", job)), "oneshot/tool-job-notice");
+        assert.equal(dshToolJobNoticePath(mk("user", " Background Job abc finished.")), "oneshot/tool-job-notice", "asciiCI prefix like the other auto-injected families");
+        assert.equal(dshToolJobNoticePath(mk("assistant", job)), undefined, "assistant echo must never classify (#2766)");
+        assert.equal(dshToolJobNoticePath(mk("user", "the background job failed again")), undefined, "marker mid-text is not a carrier");
+    });
+
     test("dshCarrierRawMarkers stay in lockstep with the dsh lane classifiers", () => {
         const cls = oneShotCarrierPaths.dsh;
         assert.ok(cls !== undefined, "dsh lane must have a classifier registry entry");
-        assert.ok(dshCarrierRawMarkers.length >= 5, "five known dsh carrier families");
+        assert.ok(dshCarrierRawMarkers.length >= 7, "seven known dsh carrier families");
         for (const marker of dshCarrierRawMarkers) {
             const msg = { id: "lk", role: "user" as const, contentType: "text" as const, text: marker } as CoreMessage;
             assert.notEqual(cls(msg), undefined, `marker ${JSON.stringify(marker)} no longer matches any dsh classifier`);

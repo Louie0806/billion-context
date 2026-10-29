@@ -181,9 +181,52 @@ export function dshTimeContextPath(msg: CoreMessage): string | undefined {
         : undefined;
 }
 
+<<<<<<< HEAD
 /** dsh lane classifier: any of the five evidence-backed identities → its
  *  canonical path (four durable carriers + the foldable time-context
  *  injection, #5109). */
+=======
+/** dsh paste-to-context image carrier (#5142, reporter evidence 2026-10-29):
+ *  the ptc-mode message dsh emits when a user pastes an image into context —
+ *  a user-role (text, image) pair whose text block is the generated template
+ *  \x3cpath\x3e…\x3c/path\x3e \x3ctype\x3eimage\x3c/type\x3e \x3ccontent\x3e…px, …
+ *  bytes…\x3c/content\x3e (shape verified against a production session journal:
+ *  all 550 instances carry the identical shape). One-shot: the host resends it
+ *  only on the turn it was pasted for, so once folded it leaves the resent
+ *  history forever — the ×550 drift-id family of #5139. The match is on the
+ *  most distinctive template token alone (single-marker discipline like every
+ *  other classifier here); a literal user echo is benign in both directions —
+ *  a persistent misclassified message never goes missing, so the expected-
+ *  rebase record has no observable effect on it, and a true carrier missing
+ *  its marker tail still retires loudly as drift (honest failure). These
+ *  messages are also prime image-offload targets (inline bytes), which C3's
+ *  structural pairing handles independently. #2766: assistant-role messages
+ *  are never carriers (see dshSkillCatalogPath). */
+export function dshPastedImagePath(msg: CoreMessage): string | undefined {
+    return msg.role !== "assistant" && msg.contentType === "text" && typeof msg.text === "string" && msg.text.includes("\x3ctype\x3eimage\x3c/type\x3e")
+        ? "oneshot/ptc-image"
+        : undefined;
+}
+
+/** dsh background-job completion notice (#5142, reporter evidence 2026-10-29):
+ *  tool-jobs / form:"notice" — a user-role message announcing a finished
+ *  background job ("background job <id> (…) finished [status: …, exit code:
+ *  N]. Read its output with job_output."), one per job completion (×39 in the
+ *  #5139 session). One-shot like time-context: resent only while the notice
+ *  is fresh, then gone forever after use. Prefix match (asciiCI, trimmed) on
+ *  the machine-generated lead-in; the phrasing is dsh-specific and a plain
+ *  user question starting that way stays on the wire, so a misclassification
+ *  never becomes an accounting effect (same benign-FP argument as
+ *  dshPastedImagePath). #2766: assistant-role messages are never carriers. */
+export function dshToolJobNoticePath(msg: CoreMessage): string | undefined {
+    return msg.role !== "assistant" && msg.contentType === "text" && typeof msg.text === "string" && startsWithAsciiCI(msg.text.trim(), "background job")
+        ? "oneshot/tool-job-notice"
+        : undefined;
+}
+
+/** dsh lane classifier: any of the four evidence-backed carriers → its
+ *  canonical durable identity. */
+>>>>>>> d90368c8 (fix(#5142): register ptc-mode and tool-job one-shot carriers from reporter wire samples)
 function dshDurableToolPath(msg: CoreMessage): string | undefined {
     return (
         dshSkillCatalogPath(msg) ??
@@ -242,11 +285,13 @@ export const oneShotCarrierPaths: Record<string, DurableMessageClassifier> = {
         dshWorkspaceInstructionsPath(msg) ??
         dshRuntimeContextPath(msg) ??
         dshMcpCatalogPath(msg) ??
-        dshTimeContextPath(msg),
+        dshTimeContextPath(msg) ??
+        dshPastedImagePath(msg) ??
+        dshToolJobNoticePath(msg),
 };
 
 /** #5142: raw-content pre-filter markers for the stored-row backfill — the
- *  exact marker strings of the five dsh classifiers above, so a unified-store
+ *  exact marker strings of the seven dsh classifiers above, so a unified-store
  *  row can be screened with cheap substring checks BEFORE JSON.parse (rows
  *  may carry megabytes of base64 media). Lockstep with the classifiers is
  *  enforced in tests/issue5142-expected-rebase.test.ts. */
@@ -256,4 +301,6 @@ export const dshCarrierRawMarkers: readonly string[] = [
     "Current runtime context",
     "\x3cmcp_catalog\x3e",
     "Time sampled while preparing turn",
+    "\x3ctype\x3eimage\x3c/type\x3e",
+    "background job",
 ];
