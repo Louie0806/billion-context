@@ -30,7 +30,7 @@ import { fakeBufCap, injectFakeCompletionHint, isFakeCompletion, maxFakeCompleti
 import { fetchWithTimeout, fetchWithTransportRetry } from "../fetch-util.js";
 import { currentFetchTransport } from "../fetch-transport.js";
 import { refForItemBytes } from "../image-rescale.js";
-import { countImagesInRawBody, upstreamHost } from "../image-tokens.js";
+import { countImagesInParsedBody, upstreamHost } from "../image-tokens.js";
 import { log as loggerLog } from "../logger.js";
 import { dumpReqAllowed as knobDumpReqAllowed, limitsWsOutboundBytes, rawDumpDir as knobRawDumpDir } from "../knobs.js";
 import { gcDumpDirIfConfigured } from "../state-gc.js";
@@ -671,13 +671,17 @@ async function forwardCaptured(
     // (#5708/#5835 refolds) re-send near-identical image sets — first-send
     // facts stay the pairing source, same as noteForwardedBody's semantics.
     if (prepared && prepared.protocol && req.method !== "GET" && req.method !== "HEAD" && typeof wireBody === "string") {
-        const nImages = countImagesInRawBody(prepared.protocol, wireBody);
+        // parsedBody (the pre-serialization object) avoids re-parsing the
+        // whole wire body here; a body that fails to parse carries no image
+        // facts to learn — skip exactly like the old raw-probe miss.
+        let nImages = 0;
+        try { nImages = countImagesInParsedBody(prepared.protocol, prepared.parsedBody ?? JSON.parse(wireBody)); } catch { /* unparseable — no image facts */ }
         if (nImages > 0) {
             const learnUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(req.url ?? "") ? req.url ?? undefined : opts.upstream);
             const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;
             noteForwardedImageFacts(prepared.session, {
                 nImages,
-                textSide: estimateCoreMessages(msgs) + estimateWireOverhead(prepared.protocol, wireBody),
+                textSide: estimateCoreMessages(msgs) + estimateWireOverhead(prepared.protocol, (prepared.parsedBody as Record<string, unknown> | undefined) ?? wireBody),
                 host: upstreamHost(learnUpstream),
                 fp: `${imageBillingFor(opts, learnUpstream)}:${imageTokenCapFor(opts, learnUpstream)}`,
             });
@@ -767,6 +771,9 @@ async function forwardCaptured(
             ? (prepared.session.metadata["snapshotRenderTailStart"] as number)
             : undefined;
         maybeRunInvariantJudge({
+            // #2078: reuse the seam block's single parse of sentBody instead of
+            // paying another full JSON.parse of the largest payload per turn.
+            parsed: sentParsed,
             // #4241: a render-lane turn's outbound is built from the SERVER
             // transcript (summary anchors + store rows), so its ground truth
             // is the rendered view — reconciling the client's inbound bytes

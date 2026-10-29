@@ -1871,6 +1871,13 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
 
 export type Prepared = {
     body: string | Buffer;
+    /** The pre-serialization form of `body` when the lane built it as an
+     *  object (every prepare-* does: `body` is JSON.stringify(rebuilt)).
+     *  Consumers that would re-parse the string (image walk, overhead
+     *  estimate) read this instead — JSON round-trips are structurally
+     *  equal, and one full-body parse per consumer per turn is pure CPU
+     *  (#2078 seam rationale applied to the prepared body). */
+    parsedBody?: unknown;
     session: Session;
     processedMessages: CoreMessage[];
     /** Original CoreMessages from the protocol conversion, BEFORE processTurn
@@ -3456,13 +3463,13 @@ export function outboundPayloadBreakdown(
     reqUrl: string,
 ): { textEstimate: number; overheadEstimate: number; imageTokens: number; payloadEstimate: number; armEstimate: number } {
     const billingUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(reqUrl) ? reqUrl : opts.upstream);
-    const imageTokens = imageReserveFor(prepared.session, prepared.protocol, prepared.body, opts, billingUpstream);
+    const imageTokens = imageReserveFor(prepared.session, prepared.protocol, prepared.parsedBody ?? prepared.body, opts, billingUpstream);
     // #1498-F2: a kernel-transform failure leaves processedMessages empty while
     // the outbound IS the raw client body — measure that view instead of arming
     // at wire overhead only (the mirror of localInputEstimate's fallback).
     const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;
     const textEstimate = estimateCoreMessages(msgs);
-    const overheadEstimate = estimateWireOverhead(prepared.protocol, prepared.body);
+    const overheadEstimate = estimateWireOverhead(prepared.protocol, (prepared.parsedBody as Record<string, unknown> | undefined) ?? prepared.body);
     // #1498-F1: the arm value is not only a preflight floor — the kernel's
     // tool-result truncation loop consumes it as its remaining-depth input, so
     // an optimistic text estimate (chars/4 undercounts dense JSON/code by up to

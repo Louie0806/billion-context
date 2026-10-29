@@ -12,7 +12,7 @@ import { STATUS_REPORT_CLOSE, STATUS_REPORT_OPEN } from "../acp-panel.js";
 import { credentialFingerprint, generationParamFp, handleAcpCache, lastForwardedBody, noteForwardedBody, noteForwardedImageFacts, settleUsageReport } from "../cache-ledger.js";
 import { billOutputUsage } from "../billing.js";
 import { maybeJudgeContinuity } from "../invariant-judge.js";
-import { countImagesInRawBody } from "../image-tokens.js";
+import { countImagesInParsedBody } from "../image-tokens.js";
 import { diagnoseSuccessWithoutUsage, lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { coreToAnthropic } from "acp-kernel/wire";
@@ -47,7 +47,7 @@ import { log as loggerLog } from "../logger.js";
 import { promptInputTotal, type WireProtocol } from "../util.js";
 import { DEGENERATE_RETRY_NUDGE } from "../degenerate-retry.js";
 import { endsWithDraftClose, lastUserSummaryInstruction, requestExpectsProseSummary } from "../degenerate-turn.js";
-import { safePrefix, safeSuffix, scrubLoneSurrogatesOnWire } from "../text-safe.js";
+import { safePrefix, safeSuffix, scrubLoneSurrogateEscapesOnJson } from "../text-safe.js";
 
 export const MAX_LOOP_ROUNDS = 10;
 
@@ -483,13 +483,16 @@ export async function* runCompressLoop(
         // 400). Scrub once at the single loop send chokepoint; the same string
         // then feeds resign and forensics so all three views agree (this also
         // de-duplicates the previous double JSON.stringify of the same body).
-        let wireBodyStr = scrubLoneSurrogatesOnWire(JSON.stringify(wireObj));
+        // The stringify output cannot carry a real lone-half code unit
+        // (well-formed JSON.stringify escapes each half), so the escape-only
+        // JSON variant skips the dead character-level scan.
+        let wireBodyStr = scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));
         // #3701/#3909: internal re-requests ride the same transport as the outer turn
         // (AsyncLocalStorage) — WS or plain HTTP relay — so an oversized rebuild dies the
         // same way; run the same lane-keyed soft byte budget here, before resign/forensics,
         // so both see the bytes actually transmitted.
         if (ctx.protocol) {
-            wireBodyStr = scrubLoneSurrogatesOnWire((await shedEgressIfOverBudget(wireBodyStr, ctx.protocol, {
+            const shedBody = (await shedEgressIfOverBudget(wireBodyStr, ctx.protocol, {
                 sessionId: ctx.session.id,
                 session: ctx.session,
                 // Single sink: ctx.log routes into the same tee logger
@@ -497,7 +500,11 @@ export async function* runCompressLoop(
                 // write each line twice (#3701 review Finding 2).
                 log: (level, msg) => loggerLog(level, `[acp-loop] ${msg}`),
                 phase: "loop",
-            })).body);
+            })).body;
+            // The budget rewrites only an over-limit body; an unchanged body
+            // is already scrubbed and the scrub is idempotent, so re-scrub
+            // (another full-text scan) only when the bytes actually changed.
+            if (shedBody !== wireBodyStr) wireBodyStr = scrubLoneSurrogateEscapesOnJson(shedBody);
         }
         requestOptions.resign?.(requestOptions.headers, wireBodyStr);
         // #2131 follow-up: the message array lives under `messages` (chat),
@@ -519,7 +526,9 @@ export async function* runCompressLoop(
         // text side must mirror what outboundPayloadBreakdown bills (messages +
         // wire overhead) so observed image mass = billed total - textSide.
         if (ctx.imageLearn && ctx.protocol) {
-            const nImages = countImagesInRawBody(ctx.protocol, wireBodyStr);
+            // wireObj is the exact object serialized into wireBodyStr — count
+            // from it instead of re-probing and re-parsing the string form.
+            const nImages = countImagesInParsedBody(ctx.protocol, wireObj);
             if (nImages > 0) {
                 noteForwardedImageFacts(ctx.session, {
                     nImages,
