@@ -30,7 +30,7 @@ import { fakeBufCap, injectFakeCompletionHint, isFakeCompletion, maxFakeCompleti
 import { fetchWithTimeout, fetchWithTransportRetry } from "../fetch-util.js";
 import { currentFetchTransport } from "../fetch-transport.js";
 import { refForItemBytes } from "../image-rescale.js";
-import { countImagesInParsedBody, upstreamHost } from "../image-tokens.js";
+import { countImagesInParsedBody, countImagesInRawBody, upstreamHost } from "../image-tokens.js";
 import { log as loggerLog } from "../logger.js";
 import { dumpReqAllowed as knobDumpReqAllowed, limitsWsOutboundBytes, rawDumpDir as knobRawDumpDir } from "../knobs.js";
 import { gcDumpDirIfConfigured } from "../state-gc.js";
@@ -564,8 +564,10 @@ async function forwardCaptured(
     // WS-tagged transport, network.httpOutboundBytes for the plain/proxy/pi-native relay
     // (no transport installed); managed non-WS transports pass through untouched
     // (#3701 Finding 1).
+    let outboundCopyRewritten = false;
     if (prepared && !prepared.sidePassthrough && prepared.protocol && req.method !== "GET" && req.method !== "HEAD" && typeof wireBody === "string") {
         const shed = await shedEgressIfOverBudget(wireBody, prepared.protocol, { sessionId: prepared.session.id, session: prepared.session, log, phase: "pre-send" });
+        if (shed.body !== wireBody) outboundCopyRewritten = true;
         wireBody = shed.body;
         // #4124: proactive per-prompt image-count cap — once this route PROVED a
         // count wall via an upstream rejection (learned into stats.imageCountCaps),
@@ -580,6 +582,7 @@ async function forwardCaptured(
                 resolveRef: (mt, b64) => refForItemBytes(sess, mt, b64),
             });
             if (countShed.stats.changed) {
+                outboundCopyRewritten = true;
                 sess.metadata.imageCountShed = { at: Date.now(), phase: "pre-send", cap: imgCap, archived: countShed.stats.archived };
                 log("info", `[${sess.id}] [image-count-shed] pre-send: archived ${countShed.stats.archived} oldest images to stay under the learned per-prompt cap ${imgCap} on this route (#4124) — originals stay in session storage`);
                 wireBody = countShed.body;
@@ -673,9 +676,15 @@ async function forwardCaptured(
     if (prepared && prepared.protocol && req.method !== "GET" && req.method !== "HEAD" && typeof wireBody === "string") {
         // parsedBody (the pre-serialization object) avoids re-parsing the
         // whole wire body here; a body that fails to parse carries no image
-        // facts to learn — skip exactly like the old raw-probe miss.
+        // facts to learn — skip exactly like the old raw-probe miss. When a
+        // pre-send shed rewrote the bytes, though, the pre-shed object
+        // overcounts the images actually sent — count the final string then.
         let nImages = 0;
-        try { nImages = countImagesInParsedBody(prepared.protocol, prepared.parsedBody ?? JSON.parse(wireBody)); } catch { /* unparseable — no image facts */ }
+        try {
+            nImages = outboundCopyRewritten
+                ? countImagesInRawBody(prepared.protocol, wireBody)
+                : countImagesInParsedBody(prepared.protocol, prepared.parsedBody ?? JSON.parse(wireBody));
+        } catch { /* unparseable — no image facts */ }
         if (nImages > 0) {
             const learnUpstream = route?.rewrittenUrl ?? (/^https?:\/\//i.test(req.url ?? "") ? req.url ?? undefined : opts.upstream);
             const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;

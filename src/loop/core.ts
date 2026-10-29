@@ -12,7 +12,7 @@ import { STATUS_REPORT_CLOSE, STATUS_REPORT_OPEN } from "../acp-panel.js";
 import { credentialFingerprint, generationParamFp, handleAcpCache, lastForwardedBody, noteForwardedBody, noteForwardedImageFacts, settleUsageReport } from "../cache-ledger.js";
 import { billOutputUsage } from "../billing.js";
 import { maybeJudgeContinuity } from "../invariant-judge.js";
-import { countImagesInParsedBody } from "../image-tokens.js";
+import { countImagesInParsedBody, countImagesInRawBody } from "../image-tokens.js";
 import { diagnoseSuccessWithoutUsage, lastCompressSuffix, withSessionLock, type Session } from "../session.js";
 import type { BiliMessage } from "acp-kernel/wire";
 import { coreToAnthropic } from "acp-kernel/wire";
@@ -487,6 +487,7 @@ export async function* runCompressLoop(
         // (well-formed JSON.stringify escapes each half), so the escape-only
         // JSON variant skips the dead character-level scan.
         let wireBodyStr = scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));
+        let wireShedRewrote = false;
         // #3701/#3909: internal re-requests ride the same transport as the outer turn
         // (AsyncLocalStorage) — WS or plain HTTP relay — so an oversized rebuild dies the
         // same way; run the same lane-keyed soft byte budget here, before resign/forensics,
@@ -504,7 +505,10 @@ export async function* runCompressLoop(
             // The budget rewrites only an over-limit body; an unchanged body
             // is already scrubbed and the scrub is idempotent, so re-scrub
             // (another full-text scan) only when the bytes actually changed.
-            if (shedBody !== wireBodyStr) wireBodyStr = scrubLoneSurrogateEscapesOnJson(shedBody);
+            if (shedBody !== wireBodyStr) {
+                wireShedRewrote = true;
+                wireBodyStr = scrubLoneSurrogateEscapesOnJson(shedBody);
+            }
         }
         requestOptions.resign?.(requestOptions.headers, wireBodyStr);
         // #2131 follow-up: the message array lives under `messages` (chat),
@@ -526,9 +530,14 @@ export async function* runCompressLoop(
         // text side must mirror what outboundPayloadBreakdown bills (messages +
         // wire overhead) so observed image mass = billed total - textSide.
         if (ctx.imageLearn && ctx.protocol) {
-            // wireObj is the exact object serialized into wireBodyStr — count
-            // from it instead of re-probing and re-parsing the string form.
-            const nImages = countImagesInParsedBody(ctx.protocol, wireObj);
+            // Count from the exact object serialized into wireBodyStr instead
+            // of re-probing and re-parsing the string form — unless a budget
+            // shed rewrote the bytes since that serialization, in which case
+            // the pre-shed object overcounts the images actually sent (rare
+            // path: sheds fire only above the lane byte budget).
+            const nImages = wireShedRewrote
+                ? countImagesInRawBody(ctx.protocol, wireBodyStr)
+                : countImagesInParsedBody(ctx.protocol, wireObj);
             if (nImages > 0) {
                 noteForwardedImageFacts(ctx.session, {
                     nImages,
