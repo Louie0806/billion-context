@@ -68,8 +68,27 @@ export function degenerateTurnWarning(o: TurnOutcome): string | null {
 // different defect class — #1755/#2190 — and stay out of scope), case-
 // insensitive (#1731 case drift), trailing whitespace allowed.
 const DRAFT_CLOSE_TAIL = /\x3c\/(?:summary|analysis)\x3e\s*$/i;
+// #5175: the envelope form. When the model writes the WHOLE draft as prose the
+// close above is not at the end of the text — `</analysis>` is followed by the
+// `<summary>` BODY, tens of thousands of characters of it, so the `$` anchor can
+// never match and the turn slipped through as an ordinary answer. The envelope
+// signature is exactly the ordering the client's compaction contract describes
+// ("an <analysis> block followed by a <summary> block"): an analysis close
+// IMMEDIATELY followed by a summary open, whitespace between them. Corpus census
+// (8225 fields, 462 sessions): 25 fields carry it, 5 carry the full open…close
+// envelope, and only ONE — the already-handled tail form — ends with it. Nothing
+// else in the corpus produces that adjacency, so it cannot false-positive on
+// prose that merely mentions the words.
+const DRAFT_ENVELOPE = /\x3c\/analysis\x3e\s*\x3csummary\x3e/i;
 export function endsWithDraftClose(text: string): boolean {
     return text.length > 0 && DRAFT_CLOSE_TAIL.test(text);
+}
+/** #5175: the draft-envelope shape — a handoff/compression draft written as
+ *  prose in either of its two observable forms: the closing tag at the very end
+ *  (#2303), or the analysis→summary envelope anywhere (#5175). Both mean the
+ *  model narrated the action instead of issuing it, so both are non-converged. */
+export function isDraftDump(text: string): boolean {
+    return text.length > 0 && (DRAFT_CLOSE_TAIL.test(text) || DRAFT_ENVELOPE.test(text));
 }
 
 // #2612: the #2303 draft-tail shape has a legitimate producer — the CLIENT's

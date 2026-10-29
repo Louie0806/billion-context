@@ -117,6 +117,9 @@ const REF_TOKEN = "m\\d{4,}";
 // replays 2^N partitions over an N-ref run (#4178: one push of 28
 // space-joined refs took 11s; 34 refs ~ 1.2h — comma-joined was 2ms).
 const REFS_RUN = REF_TOKEN + "(?:\\s*(?:[\u2013\u2014,\-]\\s*)?" + REF_TOKEN + ")*";
+// #5175: a single bare ref, never part of a word (the anchor prevents `xm12345`
+// and `m12345y` from counting).
+const BARE_REF = "(?<![\\w])" + REF_TOKEN + "(?![\\w])";
 // Whole string is a refs run (optionally padded): tag content, not prose.
 const REFS_ONLY = new RegExp("^\\s*" + REFS_RUN + "\\s*$");
 // Superset: the run may also END on an incomplete ref prefix (m / m0 / m00…)
@@ -245,6 +248,145 @@ const BROKEN_ATTRS = new RegExp("\x3c" + NAME + "\\s[^<>]*(?=\x3c)");
 // real element name carry no `=`, and a properly formed render tag matches
 // LONE_OPEN/PAIRED, not this.
 const MANGLED_OPEN = new RegExp("\x3c" + NAME + "\\s*=\\s*[^<>]*>");
+
+// #5175: the OPEN-side name enum only ever allowed MID-name mutation (`acpi`),
+// never a tail append, so every drifted name (`acpt`/`apct`/`acct`/`accent`/
+// `acad`/`actp`/`acme`/`acc`) missed RENDER_TAG_DETECT, PARTIAL_TAIL and
+// BROAD_TAG_HEAD_TALE at once and a model-imitating turn reached the client
+// verbatim:
+//   `acpt> </acpt> <acpt m17138></acpt>  </apct> </apct> ...`
+// Enumerating names cannot close this: the CLOSE side already learned the same
+// lesson — "the close-name drift set is open (ap/ck/ak/fullwidth …)" is the
+// quoted reason ORPHAN_REF_CLOSE keys on an ASCII class instead of the enum
+// (#2190). The open side never got that treatment.
+//
+// A blanket "any tag name" rule is NOT the answer: #2190 round 3 pins genuine
+// markup byte-exact (`<account>m00375</account>`, `<acmap>`, `<acstep>`), and a
+// user really can write XML like that. So these key on the two payload shapes
+// that are render-tag imitation and nothing else — the NAME is the part that
+// drifts, so the name is the part left open:
+//
+//   DRIFT_PAIR  <N mNNNNN(–mMMMMM)></N>   ref in the ATTRIBUTE slot, body empty
+//   DRIFT_ATTR  <N … tokens=… >refs</N>    the emitter's own attribute
+//
+// DRIFT_PAIR is structurally impossible as prose (an attribute whose entire
+// value is a bare kernel reference, with an empty body). DRIFT_ATTR requires
+// the exact attribute the kernel emitter writes. Neither can fire on a tool
+// call, whose argument slot is `key="value"` pairs (#1039 keeps those intact).
+const DRIFT_NAME_SRC = "([A-Za-z][A-Za-z0-9_]{0,31})";
+const DRIFT_PAIR = new RegExp("\\x3c" + DRIFT_NAME_SRC + "\\s+(" + REFS_RUN + ")\\s*>\\s*\\x3c\\/\\1\\s*>", "gi");
+const DRIFT_ATTR = new RegExp("\\x3c" + DRIFT_NAME_SRC + "\\s[^<>]*\\btokens\\s*=[^<>]*>\\s*(" + REFS_RUN + ")\\s*\\x3c\\/\\1\\s*>", "gi");
+const DRIFT_ATTR_TAIL = /^\s*\x3c\/[A-Za-z]{0,32}\s*$/;
+
+/** #5175/#5175 whole-text drift strip. Removes matched pairs, then the orphan
+ *  halves of the names they proved — a lone `</acct>` is indistinguishable from
+ *  prose on its own, so the pair is what licenses its removal. `attested` is
+ *  the caller's evidence that an echo exists in this content (#1760 keeps a
+ *  bare close-only shape when nothing attests it). */
+function stripDriftPairs(text: string, attested: boolean): string {
+    if (!text.includes("\x3c")) return text;
+    // 1) Prove the drift names from GENUINE pairs on the raw text. A drift pair
+    //    is the licence for every name-side cleanup below: a bare `</acct>` or a
+    //    mangled `acpt>` is indistinguishable from prose on its own, so the pair
+    //    is what makes its removal content-safe (#1760's rule, reused).
+    const proven = new Set<string>();
+    for (const re of [DRIFT_PAIR, DRIFT_ATTR]) {
+        re.lastIndex = 0;
+        for (;;) {
+            const hit = re.exec(text);
+            if (hit === null) break;
+            proven.add(hit[1].toLowerCase());
+        }
+    }
+    // 2) Residue LINES come first: the proof term is a bare ref sitting on the
+    //    line, and step 3 would consume it. A line is the unit the imitation is
+    //    written in, so its halves are adjudicated together.
+    let out = stripResidueRuns(text);
+    // 3) The pairs themselves, then their orphan halves — a lone `</acct>` or the
+    //    headless `acpt>` the report opens with. Scoped to the proven names, so
+    //    balanced markup of any other name keeps its bytes (#2190 round 3).
+    out = out.replace(DRIFT_PAIR, () => "");
+    out = out.replace(DRIFT_ATTR, () => "");
+    for (const name of proven) {
+        const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        out = out.replace(new RegExp("\\x3c" + esc + "\\s+[^<>]*>", "gi"), "");
+        out = out.replace(new RegExp("\\x3c\\/" + esc + "\\s*>", "gi"), "");
+        out = out.replace(new RegExp("(?<![\\w<>\\/])" + esc + ">", "gi"), "");
+    }
+    return out;
+}
+
+// #5175: a residue LINE is a line whose tokens are ALL tag-shaped fragments or
+// bare kernel references and that contains at least one ORPHAN — an open with no
+// close, a close with no open, or a bare `name>` whose `\x3c` was lost. It is the
+// line the imitation is written on: prose contains words, and a word is neither
+// a fragment nor a ref, so ordinary sentences never match. Legitimate balanced
+// markup — `<account>m00375</account>`, `<acmap>`, `<acstep>` (#2190 round 3) —
+// has no orphan and is kept byte-exact.
+const FRAGMENT_TOKEN = "\x3c\\/?" + "[A-Za-z][A-Za-z0-9_]{0,31}(?=[\\s>])[^<>]{0,32}>"
+    + "|(?<![\\w<>\\/])[A-Za-z][A-Za-z0-9_]{0,31}>"
+    + "|" + BARE_REF;
+const RESIDUE_LINE = new RegExp("^[ \\t]*(?:(?:" + FRAGMENT_TOKEN + ")[ \\t]*)+$", "i");
+const LINE_TOKEN = new RegExp(FRAGMENT_TOKEN, "gi");
+const LINE_NAME = new RegExp("^(\x3c\\/?)?" + "([A-Za-z][A-Za-z0-9_]{0,31})(?=[\\s>])", "i");
+const LINE_HAS_REF = new RegExp(BARE_REF, "i");
+
+/** #5175: an orphan fragment is only residue when the line ALSO carries a
+ *  bracketed companion of the same name — an open that lost its close, or a
+ *  close whose open was mangled away. That companion is the proof that the name
+ *  is an imitation of a render tag rather than a word that happens to sit next
+ *  to a reference: `m01233</kem>` has no `<kem>` anywhere, so it stays verbatim
+ *  (#1720/#2023's documented residual), while the reported paragraph names
+ *  `acpt` and `apct` in both bracket forms. */
+function lineHasOrphan(line: string): boolean {
+    const opens = new Map<string, number>();
+    const closes = new Map<string, number>();
+    const bare = new Map<string, number>();
+    LINE_TOKEN.lastIndex = 0;
+    for (;;) {
+        const tok = LINE_TOKEN.exec(line);
+        if (tok === null) break;
+        const nm = LINE_NAME.exec(tok[0]);
+        if (nm === null) continue;
+        const name = nm[2].toLowerCase();
+        const slash = nm[1];
+        if (slash === "\x3c/") closes.set(name, (closes.get(name) ?? 0) + 1);
+        else if (slash === "\x3c") opens.set(name, (opens.get(name) ?? 0) + 1);
+        else bare.set(name, (bare.get(name) ?? 0) + 1);
+    }
+    const bracketed = (n: string): boolean => (opens.get(n) ?? 0) + (closes.get(n) ?? 0) > 0;
+    // a close with no open: residue only if the name is bracketed elsewhere
+    for (const [n, c] of closes) if ((opens.get(n) ?? 0) < c && bracketed(n) && (opens.get(n) ?? 0) > 0) return true;
+    // an open with no close: residue only if the name is bracketed elsewhere
+    for (const [n, c] of opens) if ((closes.get(n) ?? 0) < c && (closes.get(n) ?? 0) > 0) return true;
+    // the headless `acpt>`: residue only when the named tag appears bracketed
+    for (const n of bare.keys()) if (bracketed(n)) return true;
+    return false;
+}
+
+
+/** Strip #5175 residue lines. Removes the FRAGMENTS, not the whole line: the
+ *  whitespace between two imitated spans is real text the whole-pair path also
+ *  preserves (`<acp …>m00501</acp> <acp …>m00505</p>` -> " ", #2190 test 9). */
+function stripResidueRuns(text: string): string {
+    if (!text.includes("\x3c")) return text;
+    return text
+        .split("\n")
+        .map((line) => {
+            if (!RESIDUE_LINE.test(line)) return line;
+            if (!LINE_HAS_REF.test(line)) return line;
+            if (!lineHasOrphan(line)) return line;
+            const kept = line.replace(new RegExp(FRAGMENT_TOKEN, "gi"), "");
+            // A line that is residue END TO END (nothing but separators left) is
+            // the imitation itself -- drop it whole. A mixed line keeps its
+            // interior separators: they are the real text between two spans
+            // (#2190 test 9, `<acp ...>m00501</acp> <acp ...>m00505</p>` -> " ").
+            return kept.trim() === "" ? "" : kept;
+        })
+        .join("\n");
+}
+
+
 const DEFINITE_TAIL = new RegExp("^\x3c" + NAME + "\\s|^\x3c" + NAME + "=|^\x3c\\/" + NAME);
 const OPEN_WITH_ATTRS = new RegExp("^\x3c" + NAME + "\\s");
 const CLOSE_HEAD = "\x3c/";
@@ -513,6 +655,11 @@ function stripPass(text: string, dropToolCallEmission: boolean, requestText: str
         .replace(new RegExp(TRUNC_CLOSE.source), "")
         .replace(new RegExp(TRUNC_REF_CLOSE.source), "")
         .replace(MARKER_LINE, "");
+    // #5175: drifted-name render-tag imitation. Runs LAST so the name enum has
+    // already claimed everything it recognises; what reaches here is exactly the
+    // drift this pass exists for. `attested || out !== text` mirrors
+    // DEAD_REF_CLOSE's gate (#1760).
+    out = stripDriftPairs(out, attested || out !== text);
     return stripBiliArtifacts(out);
 }
 
@@ -1098,6 +1245,11 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
         }
         return out + s.slice(last);
     };
+    /** #5175: release path — the whole-text artifact set plus the drifted-name
+     *  cleanup. A span the machine settles as prose still carries the imitation's
+     *  orphan halves when its pair resolved in an earlier push, so the same
+     *  name-agnostic rules run here too. */
+    const releaseProse = (s: string, attested = false): string => stripDeadRefCloses(s, attested);
     const deadUnitIn = (s: string): boolean => {
         if (!s.includes("\x3c/")) return false;
         const re = new RegExp(DEAD_REF_CLOSE.source, "g");
@@ -1161,7 +1313,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                         const d = degenCloseAfterRef(combined);
                         const term = span !== null ? span.start : d !== null ? d.start : -1;
                         if (term === -1 || o.index < term) {
-                            out += stripDeadRefCloses(combined.slice(0, o.index), true);
+                            out += releaseProse(combined.slice(0, o.index), true);
                             dropSwallowSpan(o[0]);
                             swallowed = "";
                             swallowUntilClose = false;
@@ -1194,7 +1346,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                         // the close for content that arrived before it.
                         const t = TRUNC_OPEN.exec(inner);
                         if (t !== null) {
-                            out += stripDeadRefCloses(inner.slice(0, t.index));
+                            out += releaseProse(inner.slice(0, t.index));
                             dropSwallowSpan(combined.slice(t.index, span.end));
                             buf = combined.slice(span.end);
                         } else {
@@ -1305,7 +1457,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                 // settled dead unit out of the prose before it, and kill any
                 // settle held pending a tail that just completed into it
                 // (#4164).
-                out += stripDeadRefCloses(buf.slice(0, broken.index));
+                out += releaseProse(buf.slice(0, broken.index));
                 buf = buf.slice(broken.index + broken[0].length);
                 swallowUntilClose = true;
                 swallowLimit = IMITATION_SWALLOW_CAP;
@@ -1350,7 +1502,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                         held = t[0];
                         if (definite) {
                             preHeld = "";
-                            out += stripDeadRefCloses(rawPre, true);
+                            out += releaseProse(rawPre, true);
                         } else {
                             preHeld = deadUnitIn(rawPre) ? rawPre : "";
                             if (preHeld === "") out += rawPre;
@@ -1361,19 +1513,19 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                         // though its drop was only just recorded — force the
                         // gate or a settled unit ahead of it leaks raw.
                         preHeld = "";
-                        out += stripDeadRefCloses(rawPre, true);
+                        out += releaseProse(rawPre, true);
                     } else {
                         // Same release-as-prose semantics as the short path:
                         // a settled dead unit dies when an echo is attested.
                         preHeld = "";
-                        out += stripDeadRefCloses(buf);
+                        out += releaseProse(buf);
                     }
                 } else {
                     // #2862: release as prose, minus any dead ref-close unit
                     // (an echo is already attested in this response). A still-
                     // held settle resolves to prose here too (#4164) and
                     // precedes this buffer in input order.
-                    const rel = stripDeadRefCloses(buf);
+                    const rel = releaseProse(buf);
                     const resolved = rel;
                     if (onResidueWarn && containsEchoResidue(resolved)) onResidueWarn(resolved);
                     out += resolved;
@@ -1384,7 +1536,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
             // though its drop has not been recorded yet — force the gate for
             // the prose released ahead of it, and kill any settle held pending
             // the tail that just completed into this tag (#4164).
-            out += stripDeadRefCloses(buf.slice(0, m.index), true);
+            out += releaseProse(buf.slice(0, m.index), true);
             buf = buf.slice(m.index + m[0].length);
             // A PAIRED match is by definition a complete open+content+close
             // span — only a LONE_OPEN leaves the stream mid-tag and needs to
@@ -1510,7 +1662,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
             // #2862: dead ref-close units die before the truncate branches —
             // TRUNC_CLOSE would otherwise eat the \x3c/name tail at EOF and
             // shadow the unit down to a bare ref (#2348 v4 ordering).
-            const rest = stripDeadRefCloses(preHeld + swallowed + held);
+            const rest = releaseProse(preHeld + swallowed + held);
             const wasSwallowing = swallowUntilClose;
             preHeld = "";
             swallowed = "";

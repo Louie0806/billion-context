@@ -58,7 +58,7 @@ function tailLooksTerminal(tail: string, protocol: WireProtocol | "responses"): 
     return /event: response\.(?:completed|failed|incomplete)/.test(tail.slice(0, 64)) ||
         /"type"\s*:\s*"response\.(?:completed|failed|incomplete)"/.test(tail);
 }
-import { degenerateTurnWarning, endsWithDraftClose, requestExpectsProseSummary } from "./degenerate-turn.js";
+import { degenerateTurnWarning, isDraftDump, requestExpectsProseSummary } from "./degenerate-turn.js";
 import { getChangelog, latestChangelog, warmChangelogOnce } from "./web/changelog.js";
 import { warmBlogRefreshOnce } from "./web/blog-refresh.js";
 import { PANEL_BOX_FOOTER } from "./acp-panel.js";
@@ -2660,7 +2660,7 @@ export async function pipePluginChatWithStrip(
         // #2612: the request's OWN instruction can make this shape the correct
         // answer — a client compaction asking for a plain-text <summary> block
         // must not be retried (its compliant reply IS a draft tail).
-        const draftTail = visibleTextChars > 0 && !sawToolUse && endsWithDraftClose(proseAcc) && !requestExpectsProseSummary(requestText);
+        const draftTail = visibleTextChars > 0 && !sawToolUse && isDraftDump(proseAcc) && !requestExpectsProseSummary(requestText);
         // #2756: the gate asks "did the host receive ANSWER text?" — prose that
         // is nothing but whitespace (a bare "\n\n" from a degenerate stop, the
         // B-accident shape) is not an answer; the empty-turn retry must fire for
@@ -4071,7 +4071,7 @@ export async function pipePluginResponsesWithStrip(
         // compression-draft closing tag with no function call is non-converged.
         // #2612: except when the request itself demands that shape (client
         // compaction summary instruction) — see the chat-pipe twin.
-        const draftTail = (visibleTextChars > 0 || heldVisibleChars > 0) && !sawFunctionCall && endsWithDraftClose(proseAcc) && !requestExpectsProseSummary(requestText);
+        const draftTail = (visibleTextChars > 0 || heldVisibleChars > 0) && !sawFunctionCall && isDraftDump(proseAcc) && !requestExpectsProseSummary(requestText);
         // #2756: same question as the chat-pipe twin — "did the host receive
         // ANSWER text?". Reasoning inlined into item.content[] (vLLM/
         // llama.cpp reasoning_text) and whitespace-only output_text (a bare
