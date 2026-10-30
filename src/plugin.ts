@@ -3037,6 +3037,16 @@ export async function pipePluginChatWithStrip(
         // would reintroduce exactly that rewrite through the back door.
         const released = s.filter.push(text);
         const clean = isVerbatimField(field) ? released : stripDriftResidue(released);
+        // #5175 x #2303: the drift adjudication can empty an entire delta the
+        // state machine released verbatim. That is stripped-EVIDENCE, exactly
+        // like onTagDrop — without recording it the empty-turn retry gate
+        // (#732/#821) judges the turn "bare: no thinking, no stripped echo, no
+        // released markup" and passes a SILENTLY EMPTY assistant message to the
+        // client, which is worse than the verbatim leak it replaced.
+        if (clean !== released) {
+            sawStrippedEcho = true;
+            releasedMarkupChars += released.length - clean.length;
+        }
         if (clean.length > 0) proseAcc += clean;
         return [clean, clean !== text];
     };
@@ -4470,7 +4480,19 @@ export async function pipePluginResponsesWithStrip(
                             await write(rawEvent + "\n\n");
                             continue;
                         }
-                        const clean = tagFilter.push(delta);
+                        const releasedDelta = tagFilter.push(delta);
+                        // #5175: the responses wire needs the SAME release-point
+                        // adjudication its chat twin does (pushField). The state
+                        // machine is tag-STRUCTURE scoped, so a drifted name
+                        // (`acpt`) never enters it and rides out verbatim, and the
+                        // whole-text pass that would catch it runs after the
+                        // client has already rendered the frame. Missing this made
+                        // the two lanes disagree — chat strips, responses leaks —
+                        // which is how defect A survived on the responses wire.
+                        // The signed-reasoning channel never reaches this branch
+                        // (it is handled above, byte-verbatim, #1960).
+                        const clean = stripDriftResidue(releasedDelta);
+                        if (clean !== releasedDelta) sawStrippedEcho = true;
                         lastDeltaMeta = { item_id: ev["item_id"], output_index: ev["output_index"] };
                         if (!inRetry && heldItemId === undefined && ev["item_id"] !== undefined) {
                             heldItemId = ev["item_id"];

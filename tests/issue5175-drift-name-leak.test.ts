@@ -464,3 +464,73 @@ test("#5175 B: a retried turn that answers correctly emits no #870 error", async
     assert.ok(text.includes("the real answer"), "the retry's answer reaches the client");
     assert.equal(text.includes("degenerated again"), false, "the retry answered, so no #870 error may be emitted");
 });
+
+// #5175 defect A, second lane: the chat wire adjudicates a released delta at the
+// release point (`pushField` → `stripDriftResidue`); the responses wire had NO
+// such call, so the reported paragraph rode `response.output_text.delta`
+// straight to the client. The original proof for A drove the chat pipe only, so
+// the suite stayed green while the responses lane kept leaking. Two wires, one
+// gateway: the same model output must reach the client as the same text.
+const DRIFTED =
+    "acpt> </apct> <acpt m17138></epct>  </apct> </apct>";
+
+function driveResponsesOnce(payload: string): Promise<{ text: string; calls: number }> {
+    const enc = new TextEncoder();
+    const sse = (type: string, extra: Record<string, unknown>): string => `event: ${type}\ndata: ${JSON.stringify({ type, ...extra })}\n\n`;
+    const of = (ev: string[]): ReadableStream<Uint8Array> => {
+        let i = 0;
+        return new ReadableStream<Uint8Array>({ pull(c) { if (i < ev.length) c.enqueue(enc.encode(ev[i++])); else c.close(); } });
+    };
+    const writes: string[] = [];
+    const res = makeResLocal(writes);
+    const session = { ...makeSessionLocal(), id: "testsess5175_resp_" + Math.random().toString(36).slice(2), stats: { pendingFoldUsage: false, compressCreditTokens: 0 } } as unknown as Session;
+    let calls = 0;
+    const refetch = (): Promise<ReadableStream<Uint8Array>> => {
+        calls += 1;
+        return Promise.resolve(of([sse("response.output_text.delta", { item_id: "oi1", output_index: 0, delta: "the real answer" }), sse("response.completed", { response: { id: "r1", usage: { input_tokens: 1, output_tokens: 1 } } })]));
+    };
+    const events = [sse("response.output_text.delta", { item_id: "oi1", output_index: 0, delta: payload }), sse("response.completed", { response: { id: "r1", usage: { input_tokens: 1, output_tokens: 1 } } })];
+    return pipePluginResponsesWithStrip(streamOfLocal(events), res as unknown as import("node:http").ServerResponse, session, undefined, refetch).then(() => ({
+        text: [...writes.join("").matchAll(/"delta":"((?:[^"\\]|\\.)*)"/g)].map((m) => JSON.parse(`"${m[1]}"`) as string).join(""),
+        calls,
+    }));
+}
+
+test("#5175 A: the responses lane strips the reported unit too, not just the chat pipe", async () => {
+    // REPORTED's pairs are all ENUMERATED closes (`</apct>`), so the state
+    // machine claims them before any drift rule runs: it exercises the fast-path
+    // gate well and the drift adjudication poorly. DRIFTED carries a close that
+    // is NOT in the enum — that is what actually reaches the drift rules.
+    const { text, calls } = await driveResponsesOnce(DRIFTED);
+    assert.equal((text.match(/m\d{4,}/g) ?? []).length, 0, `a kernel ref reached the responses client: ${JSON.stringify(text)}`);
+    assert.ok(!text.includes("<acpt"), `a render-tag open reached the responses client: ${JSON.stringify(text)}`);
+    assert.equal(calls, 1, "the responses lane must judge the fully stripped turn degenerate and re-issue it");
+    assert.ok(text.includes("the real answer"), `the retry's answer must reach the client, got ${JSON.stringify(text)}`);
+});
+
+// A drift-stripped delta IS stripped evidence for the #732/#821 empty-turn gate.
+// Without recording it the gate judges the turn "bare" and hands the client a
+// silently EMPTY assistant message — strictly worse than the verbatim leak it
+// replaced, because the host renders nothing and the turn reads as a stall.
+test("#5175 A: a drift-stripped turn is retried instead of reaching the client empty", async () => {
+    const enc = new TextEncoder();
+    const chunk = (delta: Record<string, unknown>, finish: string | null = null): string =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+    const DONE = "data: [DONE]\n\n";
+    const of = (ev: string[]): ReadableStream<Uint8Array> => {
+        let i = 0;
+        return new ReadableStream<Uint8Array>({ pull(c) { if (i < ev.length) c.enqueue(enc.encode(ev[i++])); else c.close(); } });
+    };
+    const writes: string[] = [];
+    const res = makeResLocal(writes);
+    const session = makeSessionLocal();
+    let calls = 0;
+    const refetch = (): Promise<ReadableStream<Uint8Array>> => {
+        calls += 1;
+        return Promise.resolve(of([chunk({ role: "assistant" }), chunk({ content: "the real answer" }), chunk({}, "stop"), DONE]));
+    };
+    await pipePluginChatWithStrip(of([chunk({ role: "assistant" }), chunk({ content: DRIFTED }), chunk({}, "stop"), DONE]), res as unknown as import("node:http").ServerResponse, "openai", session, undefined, refetch);
+    const text = [...writes.join("").matchAll(/"content":"((?:[^"\\]|\\.)*)"/g)].map((m) => JSON.parse(`"${m[1]}"`) as string).join("");
+    assert.equal(calls, 1, "a fully drift-stripped turn must be retried, not passed through empty");
+    assert.ok(text.includes("the real answer"), `the retry's answer must reach the client, got ${JSON.stringify(text)}`);
+});
