@@ -129,7 +129,12 @@ test("(a) between-turns drop: every landed request-end boundary discharges dropp
         assert.ok((s.blockContents as LazyBlockContents).isDropped, "still folded after the second boundary");
         assert.ok(isDroppedMetadata(s.metadata));
     } finally {
-        store.cancelAll();
+        // #4788: `cancelAll` only clears timers — the unified sidecar's sqlite
+        // handle stays open, and Windows refuses to unlink index.db while it is
+        // (EBUSY). These stores are per-test short-lived, so close the handle
+        // before the teardown delete. Pre-fix this never showed because the
+        // suite died on an unsettled verdict before reaching cleanup.
+        store.closeQuietly();
         rmrf(dir);
     }
 });
@@ -164,7 +169,12 @@ test("(b) narrow-read reconstruction deepEquals the pre-drop reference", async (
         const rec = (parsed.payload ?? parsed) as Record<string, unknown>;
         assert.equal(Object.keys((rec.blockContents ?? {}) as object).length, Object.keys(refBlocks).length, "full set round-trips through the envelope");
     } finally {
-        store.cancelAll();
+        // #4788: `cancelAll` only clears timers — the unified sidecar's sqlite
+        // handle stays open, and Windows refuses to unlink index.db while it is
+        // (EBUSY). These stores are per-test short-lived, so close the handle
+        // before the teardown delete. Pre-fix this never showed because the
+        // suite died on an unsettled verdict before reaching cleanup.
+        store.closeQuietly();
         rmrf(dir);
     }
 });
@@ -203,7 +213,12 @@ test("(c) hard cap under sustained activity: boundaries drop, in-flight skips, w
             process.env.BILI_SESSION_RESIDENT_HARD_MAX_BYTES = saved;
         }
     } finally {
-        store.cancelAll();
+        // #4788: `cancelAll` only clears timers — the unified sidecar's sqlite
+        // handle stays open, and Windows refuses to unlink index.db while it is
+        // (EBUSY). These stores are per-test short-lived, so close the handle
+        // before the teardown delete. Pre-fix this never showed because the
+        // suite died on an unsettled verdict before reaching cleanup.
+        store.closeQuietly();
         rmrf(dir);
     }
 });
@@ -246,7 +261,12 @@ test("(d) envelope-frozen routing is unchanged AND gets equivalent drops", async
         assert.equal(s.blockContents.size, 21, "all entries resident again after reconstruction");
     } finally {
         process.env.BILI_STORAGE_UNIFIED = "legacy";
-        store.cancelAll();
+        // #4788: `cancelAll` only clears timers — the unified sidecar's sqlite
+        // handle stays open, and Windows refuses to unlink index.db while it is
+        // (EBUSY). These stores are per-test short-lived, so close the handle
+        // before the teardown delete. Pre-fix this never showed because the
+        // suite died on an unsettled verdict before reaching cleanup.
+        store.closeQuietly();
         rmrf(dir);
     }
 });
