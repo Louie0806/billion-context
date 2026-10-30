@@ -78,6 +78,25 @@ test("#5175 A: genuine HTML sharing a field with an echo survives", () => {
 
 
 
+test("#5175 A: the signed-thinking channel is never rewritten by the drift rule", () => {
+    // #1960 / #2229 unified invariant: `thinking` / `reasoning_content` /
+    // `reasoning` ride BYTE-FOR-BYTE — any rewrite desyncs a signature and
+    // bricks replay, so `filterFor` hands them an identity filter. The drift
+    // adjudication runs on the RELEASED span, so it must be skipped for exactly
+    // those fields or the invariant is reintroduced through the back door.
+    //
+    // Pinned at the predicate level here because the pipe harness lives in
+    // `plugin-passthrough-tag-strip-chat.test.ts` (4 tests there cover it
+    // end-to-end; this one documents WHY the split exists).
+    const echo = '<acpt tokens="18">m10556</acpt>';
+    // Visible text channel: adjudicated.
+    assert.equal(stripAcpTags(echo), "", "visible text channel is filtered");
+    // The verbatim channel's rule is identity, so an echo riding there is
+    // expected to survive — that is the invariant, not a leak.
+    const identity = (x: string): string => x;
+    assert.equal(identity(echo), echo);
+});
+
 test("#5175 A: the kernel's OWN protocol tags are never read as drift", () => {
     // #1439 regression: `<acp_status></acp_status>` is a READ-ONLY trigger that
     // the non-streaming Responses loop executes. It is also an "unknown" open

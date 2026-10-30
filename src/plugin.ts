@@ -2526,6 +2526,12 @@ export async function pipePluginChatWithStrip(
         index: number;
     }
     const streams = new Map<string, PipeStream>();
+    // #1960 / #2229 / #5175: fields whose bytes must ride BYTE-FOR-BYTE. Kept
+    // beside `filterFor` so the identity-filter decision and this one cannot
+    // drift apart — a field routed to the identity filter must never be
+    // post-processed either.
+    const isVerbatimField = (field: string): boolean =>
+        field === "thinking" || (protocol === "openai" && (field === "reasoning_content" || field === "reasoning"));
     const filterFor = (field: string, index: number) => {
         const key = `${field}:${index}`;
         let s = streams.get(key);
@@ -2954,7 +2960,14 @@ export async function pipePluginChatWithStrip(
         // rendered the frames by then — so adjudicate the released span here
         // too. Pure and idempotent; a pair split across two pushes degrades to
         // the historical residual exactly like #1720's.
-        const clean = stripDriftResidue(s.filter.push(text));
+        //
+        // The signed-thinking channel is excluded: `filterFor` hands it an
+        // IDENTITY filter because any rewrite desyncs its signature and bricks
+        // replay (#1960 / #2229 unified invariant — "the thinking channel is
+        // NEVER rewritten, only the visible text channel is"). Adjudicating here
+        // would reintroduce exactly that rewrite through the back door.
+        const released = s.filter.push(text);
+        const clean = isVerbatimField(field) ? released : stripDriftResidue(released);
         if (clean.length > 0) proseAcc += clean;
         return [clean, clean !== text];
     };
