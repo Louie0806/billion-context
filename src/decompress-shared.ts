@@ -795,7 +795,7 @@ function narrowingHint(terms: string[], returned: CompressionBlock[], ranked: Co
  *  block's content is reachable today only via decompress; search pretended
  *  it did not exist). Providers are an enhancement: failures degrade to
  *  summary-only search, never fail the tool call. */
-export type OriginalTextProvider = () => Array<{ blockId: string; text: string }>;
+type OriginalTextProvider = () => Array<{ blockId: string; text: string }>;
 
 // Strip rendered acp ref tags from folded originals before indexing: the
 // wrapper (`tokens="506" type="text"`) is protocol chrome, not content —
