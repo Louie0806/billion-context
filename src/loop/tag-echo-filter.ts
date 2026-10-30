@@ -876,7 +876,17 @@ export function mayStartRenderTag(s: string): boolean {
 // prose, not residue.
 const BROAD_TAG_HEAD_TAIL = new RegExp("\x3c\\/?[A-Za-z0-9]{0,16}$");
 export function mayStartDegenerateRenderTag(s: string): boolean {
-    return BROAD_TAG_HEAD_TAIL.test(s);
+    if (BROAD_TAG_HEAD_TAIL.test(s)) return true;
+    // #5175: a COMPLETE drifted unit anywhere in the chunk, not only a head at
+    // its tail. The head-only probe was the entire gap behind the report: the
+    // paragraph ends with a CLOSED `</apct>`, so BROAD_TAG_HEAD_TAIL never
+    // matched, the fast path released the bytes verbatim, and the stripper was
+    // never consulted — the imitation reached the client without a single
+    // filter call. `containsRenderTagText` is the same shape test the
+    // non-streaming lanes gate on (stream-openai/stream-google/stream), so this
+    // makes the streaming lane agree with them instead of inventing a sixth
+    // notion of "looks like a render tag".
+    return containsRenderTagText(s);
 }
 
 // #361: tool-call XML template fragments a model may echo from the context
