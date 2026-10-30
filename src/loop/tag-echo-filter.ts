@@ -296,11 +296,22 @@ const HTML_TAG_NAMES = new Set([
     "var", "wbr",
 ]);
 const HTML_TAG_ALT = "(?:" + [...HTML_TAG_NAMES].join("|") + ")";
+// #5175: the kernel's OWN protocol tags are canonical too, and they are a closed
+// set published by `acp-kernel` (`ACP_TEXT_OPEN` etc.). They must never be read
+// as drifted render names: `<acp_status></acp_status>` is a READ-ONLY trigger
+// the non-streaming Responses path executes (`extractResponsesTextTriggers`),
+// and stripping it here ate the trigger before the loop could run it
+// (tests/fix-1439-responses-json-triggers.test.ts).
+const PROTOCOL_TAG_NAMES = new Set([
+    "acp_compress", "acp_status", "acp_search", "acp_decompress",
+]);
+const CANONICAL_TAG_ALT =
+    "(?:" + [...HTML_TAG_NAMES, ...PROTOCOL_TAG_NAMES].join("|") + ")";
 const DRIFT_EMPTY = new RegExp("\\x3c(?!(?:" + NAME + ")[\\s>/])(?!" + HTML_TAG_ALT + "\\b)" + DRIFT_NAME_SRC + "\\s*>\\s*\\x3c\\/\\1\\s*>", "gi");
 function stripEmptyPairs(text: string): string {
     if (!text.includes("\x3c/")) return text;
     return text.replace(new RegExp(DRIFT_EMPTY.source, "gi"), (whole, name: string) =>
-        HTML_TAG_NAMES.has(name.toLowerCase()) ? whole : "");
+        (HTML_TAG_NAMES.has(name.toLowerCase()) || PROTOCOL_TAG_NAMES.has(name.toLowerCase())) ? whole : "");
 }
 /** The same empty-body unit when the two halves disagree on the name —
  *  `<acpt> </apct>`. A balanced render tag never does that; an emitter
@@ -315,7 +326,7 @@ const DRIFT_EMPTY_MISMATCH = new RegExp(
 function stripEmptyMismatch(text: string): string {
     if (!text.includes("\x3c/")) return text;
     return text.replace(new RegExp(DRIFT_EMPTY_MISMATCH.source, "gi"), (whole, open: string, close: string) =>
-        HTML_TAG_NAMES.has(open.toLowerCase()) || HTML_TAG_NAMES.has(close.toLowerCase()) ? whole : "");
+        (HTML_TAG_NAMES.has(open.toLowerCase()) || PROTOCOL_TAG_NAMES.has(open.toLowerCase())) || (HTML_TAG_NAMES.has(close.toLowerCase()) || PROTOCOL_TAG_NAMES.has(close.toLowerCase())) ? whole : "");
 }
 
 // #5175 streaming: a drifted opening at the buffer tail must not be released as
@@ -334,7 +345,7 @@ function stripEmptyMismatch(text: string): string {
 //   B  opening closed, no space      <acpt>, <acpt></, <acpt></ac
 //   C  opening closed, payload       <acct …>m00257, …>m00257</ac
 //   D  opening closed, only a space  <acpt>
-const DRIFT_HEAD = "\\x3c(?!(?:" + NAME + ")[\\s>/])" + "(?!" + HTML_TAG_ALT + "\\b)" + "[A-Za-z][A-Za-z0-9_]{0,31}";
+const DRIFT_HEAD = "\\x3c(?!(?:" + NAME + ")[\\s>/])" + "(?!" + CANONICAL_TAG_ALT + "\\b)" + "[A-Za-z][A-Za-z0-9_]{0,31}";
 const DRIFT_CLOSE_FRAGMENT = "[ \\t]*(?:\\x3c\\/?[A-Za-z]{0,32}>?)?";
 const DRIFT_TAIL = new RegExp(
     DRIFT_HEAD + "(?:" +

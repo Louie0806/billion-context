@@ -78,6 +78,30 @@ test("#5175 A: genuine HTML sharing a field with an echo survives", () => {
 
 
 
+test("#5175 A: the kernel's OWN protocol tags are never read as drift", () => {
+    // #1439 regression: `<acp_status></acp_status>` is a READ-ONLY trigger that
+    // the non-streaming Responses loop executes. It is also an "unknown" open
+    // name with an empty body, i.e. exactly the shape `stripEmptyPairs` drops —
+    // so a shape-only rule ate the trigger before the loop could run it. The
+    // kernel publishes these four names in a CLOSED set, so enumerating them is
+    // legitimate (unlike the model's open drift set) and they must survive.
+    const protocol = [
+        "<acp_compress>m00001-m00005</acp_compress>",
+        "<acp_status></acp_status>",
+        "<acp_search>quantum flux</acp_search>",
+        "<acp_decompress>b3</acp_decompress>",
+    ];
+    for (const tag of protocol) {
+        assert.equal(stripAcpTags(tag), tag, `kernel protocol tag must survive: ${tag}`);
+    }
+    // …and in a real sentence, with prose around it.
+    const sentence = "status please <acp_status></acp_status>";
+    assert.equal(stripAcpTags(sentence), sentence);
+    // The streaming lane must not eat it either.
+    assert.equal(streamChunked(sentence, 1), sentence);
+    assert.equal(streamChunked(sentence, 5), sentence);
+});
+
 test("#5175 B: a draft dump is detected when the envelope sits mid-text", () => {
     const midText =
         "Let me chronologically analyze this conversation to produce a comprehensive summary.\n" +
