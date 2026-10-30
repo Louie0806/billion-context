@@ -288,3 +288,63 @@ for (const [name, text] of PARITY_SHAPES) {
         assert.equal(new Set(seen).size, 1, `chunking changed the output: ${JSON.stringify([...new Set(seen)])}`);
     });
 }
+
+// ---------- #5176 follow-up: the retry CANNOT retract what already left ----------
+
+// #4764 and this case are the same residual: the #2303 retry fires at stream
+// END, but every delta was already appended to the client's reply as it was
+// parsed (`appendReply` at each chunk). `retryEmptyTurn` only does
+// `streams.clear(); reader.cancel(); buf = ""` — it abandons the old attempt,
+// it cannot un-send bytes. So a draft dump that IS detected still lands in the
+// transcript, and the retry merely appends a second (correct) answer after it.
+//
+// This is pinned as a CHARACTERIZATION test, not an aspiration: it documents
+// why "just strip the draft from the stream" is not a one-line fix, and why
+// the real fix has to HOLD the draft span before releasing it (#5176).
+test("#5176 the #2303 retry documents its own limit: already-streamed draft bytes are not retracted", async () => {
+    const { pipePluginChatWithStrip } = await import("../src/plugin.ts");
+    const enc = new TextEncoder();
+    const chunk = (delta: Record<string, unknown>): string =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`;
+    const stop = `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+    const DONE = "data: [DONE]\n\n";
+    const of = (ev: string[]): ReadableStream<Uint8Array> => {
+        let i = 0;
+        return new ReadableStream<Uint8Array>({
+            pull(c) {
+                if (i < ev.length) c.enqueue(enc.encode(ev[i++]));
+                else c.close();
+            },
+        });
+    };
+    const writes: string[] = [];
+    const res = {
+        write(b: Buffer | string) {
+            writes.push(typeof b === "string" ? b : b.toString("utf8"));
+            return true;
+        },
+        end(b?: Buffer | string) {
+            if (b !== undefined) writes.push(typeof b === "string" ? b : b.toString("utf8"));
+        },
+        once() {},
+        destroyed: false,
+        writableEnded: false,
+    } as unknown as import("node:http").ServerResponse;
+    const session = { id: "s", protocol: "openai", upstreamOrigin: "http://127.0.0.1:9/v1", label: "t", createdAt: 0, lastUsedAt: 0, requests: 0, lastInputTokens: 0, stats: {}, dirty: false } as never;
+
+    const DRAFT = "<analysis>\nThe user asked for X.\n</analysis>\n<summary>\n1. Primary Request: X.\n";
+    const firstTurn = [chunk({ role: "assistant" }), chunk({ content: DRAFT }), stop, DONE];
+    let calls = 0;
+    const refetch = (): Promise<ReadableStream<Uint8Array>> => {
+        calls += 1;
+        return Promise.resolve(of([chunk({ role: "assistant" }), chunk({ content: "recovered action" }), stop, DONE]));
+    };
+
+    await pipePluginChatWithStrip(of(firstTurn), res, "openai", session, undefined, refetch);
+
+    const text = writes.join("");
+    assert.equal(calls, 1, "the draft IS detected and retried — the detector works");
+    // The measured limit: the draft text is still in what the client received.
+    assert.ok(text.includes("Primary Request: X"), "the already-streamed draft CANNOT be retracted (measured, not assumed)");
+    assert.ok(text.includes("recovered action"), "the retry appends its answer after it");
+});
