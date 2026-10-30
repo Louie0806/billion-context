@@ -276,7 +276,6 @@ const MANGLED_OPEN = new RegExp("\x3c" + NAME + "\\s*=\\s*[^<>]*>");
 const DRIFT_NAME_SRC = "([A-Za-z][A-Za-z0-9_]{0,31})";
 const DRIFT_PAIR = new RegExp("\\x3c" + DRIFT_NAME_SRC + "\\s+(" + REFS_RUN + ")\\s*>\\s*\\x3c\\/\\1\\s*>", "gi");
 const DRIFT_ATTR = new RegExp("\\x3c" + DRIFT_NAME_SRC + "\\s[^<>]*\\btokens\\s*=[^<>]*>\\s*(" + REFS_RUN + ")\\s*\\x3c\\/\\1\\s*>", "gi");
-const DRIFT_ATTR_TAIL = /^\s*\x3c\/[A-Za-z]{0,32}\s*$/;
 
 // #5175: the render tag emitted with NO attributes and an empty body —
 // `<acpt> </acpt>`. The pair rules above require an attribute slot (a bare ref
@@ -358,7 +357,6 @@ const DRIFT_TAIL = new RegExp(
         "\\s*>[ \\t]*" + DRIFT_CLOSE_FRAGMENT +
     ")$",
 );
-
 
 
 /** #5175/#5175 whole-text drift strip. Removes matched pairs, then the orphan
