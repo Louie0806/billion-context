@@ -10,9 +10,10 @@ import {
     mayStartMarkerLine,
     mayStartRenderTag,
     stripAcpTags,
+    stripDriftResidue,
 } from "../src/loop/tag-echo-filter.ts";
 import { endsWithDraftClose, isDraftDump } from "../src/degenerate-turn.ts";
-import { pipePluginResponsesWithStrip } from "../src/plugin.ts";
+import { pipePluginChatWithStrip, pipePluginResponsesWithStrip } from "../src/plugin.ts";
 import type { Session } from "../src/session.ts";
 
 // #5175 defect A: the open-side name enum only ever allowed MID-name mutation
@@ -35,9 +36,12 @@ function streamThrough(chunks: string[]): string {
             out += delta;
             continue;
         }
-        out += tagFilter.push(delta);
+        // #5175: mirror `pushField` exactly — the filter releases, then the
+        // release-point adjudication runs `stripDriftResidue`. Testing only the
+        // filter hides the gate bug that let the bytes skip both.
+        out += stripDriftResidue(tagFilter.push(delta));
     }
-    return out + tagFilter.flush();
+    return out + stripDriftResidue(tagFilter.flush());
 }
 
 function chunked(s: string, size: number): string[] {
@@ -45,6 +49,51 @@ function chunked(s: string, size: number): string[] {
     for (let i = 0; i < s.length; i += size) chunks.push(s.slice(i, i + size));
     return chunks;
 }
+
+// #5175 defect A, the actual production gap: EVERY probe above is a test of the
+// filter, and the filter was never reached. The streaming fast path releases a
+// delta verbatim when all four "mayStart…" probes are false, and
+// `mayStartDegenerateRenderingTag` only looked for an ambiguous head at the
+// chunk's TAIL (`\x3c…$`). The reported paragraph ends with a CLOSED `</apct>`,
+// so that probe missed, the bytes rode the fast path, and everything else in
+// this file was dead code on the wire. This test drives the REAL fast-path
+// decision, so it fails if the gate regresses even while the filter is perfect.
+// Drive the REAL openai plugin pipeline and return only the assistant text the
+// client received, so the assertion is on what the user actually sees.
+async function driveChat(chunks: string[]): Promise<string> {
+    const writes: string[] = [];
+    const res = makeResLocal(writes);
+    const chat = (delta: Record<string, unknown>): string =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`;
+    const stop = `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`;
+    const events = [chat({ role: "assistant" }), ...chunks.map((c) => chat({ content: c })), stop, "data: [DONE]\n\n"];
+    await pipePluginChatWithStrip(streamOfLocal(events), res as unknown as import("node:http").ServerResponse, "openai", makeSessionLocal(), undefined, undefined);
+    return [...writes.join("").matchAll(/"content":"((?:[^"\\]|\\.)*)"/g)].map((m) => JSON.parse(`"${m[1]}"`) as string).join("");
+}
+
+// #5175 defect A, the ACTUAL production gap — and the reason every other test
+// in this file could pass while the user still saw the paragraph verbatim:
+//
+// The SSE fast path (`processOpenai`/`processResponses`) forwards a delta
+// untouched when all four "mayStart…" probes are false. `mayStartDegenerate…`
+// only looked for an ambiguous head at the chunk's TAIL (`\x3c…$`). The
+// reported paragraph ends with a CLOSED `</acct>`, so that probe missed, the
+// bytes rode the fast path, and the filter — plus the release-point
+// adjudication behind it — was never called at all.
+//
+// So this test drives the REAL plugin pipeline end to end, not a hand-rolled
+// copy of the condition. A hand-rolled copy can drift from production (this one
+// did, and hid the bug); `pipePluginChatWithStrip` cannot.
+test("#5175 A: the streaming fast path must not release a drifted unit verbatim", async () => {
+    assert.equal(mayStartDegenerateRenderTag(REPORTED), true, "a complete drifted unit anywhere in the delta must engage the state machine, not only a head at its tail");
+    const got = await driveChat([REPORTED]);
+    // The bar is "no kernel citation reaches the client". The orphan halves
+    // (`acpt>`, whose `\x3c` was lost upstream before bili saw it) survive as
+    // the pinned KNOWN RESIDUAL below — asserting `got === ""` here would fail
+    // for a reason this PR explicitly does not fix.
+    assert.equal((got.match(/m\d{4,}/g) ?? []).length, 0, `a kernel ref reached the client: ${JSON.stringify(got)}`);
+    assert.ok(!got.includes("<acpt"), `a render-tag open reached the client: ${JSON.stringify(got)}`);
+});
 
 test("#5175 A: the reported drift-name paragraph is fully stripped whole-text", () => {
     const out = stripAcpTags(REPORTED);
