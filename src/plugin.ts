@@ -2595,6 +2595,20 @@ export async function pipePluginChatWithStrip(
     /** Set while a frame is being rewritten because a render tag was dropped:
      *  the text that survives such a frame is the tag's own interior. */
     let droppedTagInFrame = false;
+    /** #5175: the counters above answer "did THIS attempt deliver an answer?" —
+     *  the question the #2303/#732 retry and the #673 warn both ask. A retry
+     *  that takes over must start from a clean adjudication slate: the first
+     *  attempt's prose is already on the wire (unretractable), so judging the
+     *  retry against it reads the abandoned draft as the retry's own output and
+     *  emits "#870 degenerated again" for a turn that answered correctly.
+     *  visibleTextChars is deliberately NOT reset: it is turn-level observation
+     *  (the #673 warn and the truncation diag report what the client received). */
+    const resetAttemptAdjudication = (): void => {
+        proseAcc = "";
+        answerProse = "";
+        releasedMarkupChars = 0;
+        sawStrippedEcho = false;
+    };
     let finalFinishReason: string | undefined;
     // #2328 Q2/Q4: termination diagnostics — every truncation emit below
     // carries these on the in-band error frame (meta) and the log line.
@@ -2724,6 +2738,9 @@ export async function pipePluginChatWithStrip(
         delete lastChunkMeta["finishReason"];
         retryIndexOffset = blocksForwarded;
         inRetry = true;
+        // The first attempt's adjudication counters describe bytes the client
+        // already holds; the retry is judged on its own output (#5175).
+        resetAttemptAdjudication();
         // The first attempt's held filter state belongs to text the client never
         // saw (an emptying tag echo): the retry's content is filtered from
         // scratch, so a partial tag there cannot swallow its opening characters.
@@ -4132,6 +4149,12 @@ export async function pipePluginResponsesWithStrip(
         heldEvents = [];
         heldVisibleChars = 0;
         inRetry = true;
+        // The first attempt's adjudication counters describe frames the client
+        // already holds; the retry is judged on its own output (#5175).
+        proseAcc = "";
+        answerProse = "";
+        fastPathChars = 0;
+        sawStrippedEcho = false;
         // The first attempt's held filter state belongs to text the client never
         // saw (an emptying tag echo): the retry's content is filtered from
         // scratch, so a partial tag there cannot swallow its opening characters.

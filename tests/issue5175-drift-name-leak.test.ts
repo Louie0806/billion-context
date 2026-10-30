@@ -338,7 +338,7 @@ for (const [name, text] of PARITY_SHAPES) {
     });
 }
 
-// ---------- #5176 follow-up: the retry CANNOT retract what already left ----------
+// ---------- #4764 follow-up: the retry CANNOT retract what already left ----------
 
 // #4764 and this case are the same residual: the #2303 retry fires at stream
 // END, but every delta was already appended to the client's reply as it was
@@ -349,8 +349,8 @@ for (const [name, text] of PARITY_SHAPES) {
 //
 // This is pinned as a CHARACTERIZATION test, not an aspiration: it documents
 // why "just strip the draft from the stream" is not a one-line fix, and why
-// the real fix has to HOLD the draft span before releasing it (#5176).
-test("#5176 the #2303 retry documents its own limit: already-streamed draft bytes are not retracted", async () => {
+// the real fix has to HOLD the draft span before releasing it (#4764).
+test("#4764 the #2303 retry documents its own limit: already-streamed draft bytes are not retracted", async () => {
     const { pipePluginChatWithStrip } = await import("../src/plugin.ts");
     const enc = new TextEncoder();
     const chunk = (delta: Record<string, unknown>): string =>
@@ -396,4 +396,71 @@ test("#5176 the #2303 retry documents its own limit: already-streamed draft byte
     // The measured limit: the draft text is still in what the client received.
     assert.ok(text.includes("Primary Request: X"), "the already-streamed draft CANNOT be retracted (measured, not assumed)");
     assert.ok(text.includes("recovered action"), "the retry appends its answer after it");
+});
+
+// ---------- #5175 regressions found while reviewing the fix ----------
+
+// A COMPLETE draft envelope (analysis close → summary open → summary close)
+// followed by substantive prose delivered both the draft and an answer: the
+// turn converged. The unconditional envelope rule read the spent draft as a
+// stalled handoff and re-issued it on the real chat pipe, so the client got its
+// answer TWICE plus a "#870 degenerated again" frame. Pristine master answers
+// once. The rule now counts only an UNFINISHED envelope — a model that stopped
+// inside the summary body (the reported shape) still detects.
+test("#5175 B: a COMPLETE draft envelope followed by an answer is not retried", () => {
+    const complete =
+        "<analysis>\nThe user asked about sharding.\n</analysis>\n\n<summary>\n- notes\n</summary>\n\n" +
+        "Here is the real answer: the shard key is user_id.";
+    assert.equal(isDraftDump(complete), false, "a finished draft that kept writing is not a stalled handoff");
+    // The reported shape: still inside the summary body when the stream ends.
+    const open = "<analysis>\n…\n</analysis>\n\n<summary>\n1. Primary Request and Intent\n- sharding\n";
+    assert.equal(isDraftDump(open), true, "an UNFINISHED envelope is still a draft dump");
+    // And the #2303 tail form is untouched.
+    assert.equal(isDraftDump("I will now hand off.\n</analysis>"), true);
+});
+
+// The retry's adjudication must not inherit the abandoned attempt's counters:
+// the first attempt's prose is already on the wire, so judging the retry against
+// it emitted the #870 error for a turn that had answered correctly.
+test("#5175 B: a retried turn that answers correctly emits no #870 error", async () => {
+    const enc = new TextEncoder();
+    const chunk = (delta: Record<string, unknown>, finish: string | null = null): string =>
+        `data: ${JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "m", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+    const DONE = "data: [DONE]\n\n";
+    const of = (ev: string[]): ReadableStream<Uint8Array> => {
+        let i = 0;
+        return new ReadableStream<Uint8Array>({
+            pull(c) {
+                if (i < ev.length) c.enqueue(enc.encode(ev[i++]));
+                else c.close();
+            },
+        });
+    };
+    const writes: string[] = [];
+    const res = {
+        write(b: Buffer | string) {
+            writes.push(typeof b === "string" ? b : b.toString("utf8"));
+            return true;
+        },
+        end(b?: Buffer | string) {
+            if (b !== undefined) writes.push(typeof b === "string" ? b : b.toString("utf8"));
+        },
+        once() {},
+        destroyed: false,
+        writableEnded: false,
+    } as unknown as import("node:http").ServerResponse;
+    const session = { id: "s2", protocol: "openai", upstreamOrigin: "http://127.0.0.1:9/v1", label: "t", createdAt: 0, lastUsedAt: 0, requests: 0, lastInputTokens: 0, stats: {}, dirty: false } as never;
+
+    const DRAFT = "<analysis>\n…\n</analysis>\n\n<summary>\n1. Primary Request: X.\n";
+    let calls = 0;
+    const refetch = (): Promise<ReadableStream<Uint8Array>> => {
+        calls += 1;
+        return Promise.resolve(of([chunk({ role: "assistant" }), chunk({ content: "the real answer" }), chunk({}, "stop"), DONE]));
+    };
+    await pipePluginChatWithStrip(of([chunk({ role: "assistant" }), chunk({ content: DRAFT }), chunk({}, "stop"), DONE]), res, "openai", session, undefined, refetch);
+
+    const text = writes.join("");
+    assert.equal(calls, 1, "the unfinished draft IS retried");
+    assert.ok(text.includes("the real answer"), "the retry's answer reaches the client");
+    assert.equal(text.includes("degenerated again"), false, "the retry answered, so no #870 error may be emitted");
 });

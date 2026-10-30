@@ -80,15 +80,31 @@ const DRAFT_CLOSE_TAIL = /\x3c\/(?:summary|analysis)\x3e\s*$/i;
 // else in the corpus produces that adjacency, so it cannot false-positive on
 // prose that merely mentions the words.
 const DRAFT_ENVELOPE = /\x3c\/analysis\x3e\s*\x3csummary\x3e/i;
+const SUMMARY_CLOSE = /\x3c\/summary\x3e/i;
 export function endsWithDraftClose(text: string): boolean {
     return text.length > 0 && DRAFT_CLOSE_TAIL.test(text);
 }
 /** #5175: the draft-envelope shape — a handoff/compression draft written as
  *  prose in either of its two observable forms: the closing tag at the very end
- *  (#2303), or the analysis→summary envelope anywhere (#5175). Both mean the
- *  model narrated the action instead of issuing it, so both are non-converged. */
+ *  (#2303), or the analysis→summary envelope (#5175). Both mean the model
+ *  narrated the action instead of issuing it, so both are non-converged.
+ *
+ *  The envelope counts only while the draft is UNFINISHED. A complete
+ *  `</analysis><summary>…</summary>` followed by substantive prose delivered
+ *  BOTH the draft and an answer — the turn converged, and re-issuing it appends
+ *  a duplicate answer on the real chat pipe (measured: pristine master keeps a
+ *  single answer, the unconditional envelope rule produced answer + retry
+ *  answer). The reported dumps are always open-ended — the model stops inside
+ *  the summary body (#5175) or right at the analysis close (#2303) — so recall
+ *  is unchanged: the only hits this gives up are complete drafts that kept
+ *  writing, which are exactly the false positives. */
 export function isDraftDump(text: string): boolean {
-    return text.length > 0 && (DRAFT_CLOSE_TAIL.test(text) || DRAFT_ENVELOPE.test(text));
+    if (text.length === 0) return false;
+    if (DRAFT_CLOSE_TAIL.test(text)) return true;
+    const env = DRAFT_ENVELOPE.exec(text);
+    if (env === null) return false;
+    // Still inside the draft: the summary body is truncated mid-flight.
+    return !SUMMARY_CLOSE.test(text.slice(env.index + env[0].length));
 }
 
 // #2612: the #2303 draft-tail shape has a legitimate producer — the CLIENT's
