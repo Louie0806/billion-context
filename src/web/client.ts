@@ -172,6 +172,33 @@ export const WEB_CLIENT = `(function () {
             if (m && m[1] !== undefined) API_ROOT = m[1] + "__bili";
         }
     } catch (e) {}
+    // #5319 (web half): resolved pack names from GET /__bili/packs — filled by
+    // loadConfig(); empty until then and the picker falls back to default+lean.
+    // #5328: per-name provenance + the user-pack dir (server authority) so the
+    // panel knows which entries 新建/编辑/删除 may touch.
+    let packNames = [];
+    let packSources = {};
+    let packUserDir = "";
+    // #5328: indirections so the inventory refresher lives at panel scope
+    // (loadConfig can call it before/after the quick-config block is built)
+    // while DOM and selection handling stay where the elements exist.
+    let packSelEl = null;
+    let rerenderQuick = null;
+    async function refreshPackInventory() {
+        try {
+            const p = await json(API_ROOT + "/packs");
+            if (!p || !Array.isArray(p.packs)) return;
+            packNames = p.packs.map((x) => String(x.name));
+            packSources = {};
+            for (const x of p.packs) packSources[String(x.name)] = String(x.source || "");
+            if (p.userDir) packUserDir = String(p.userDir) + "/";
+        } catch (e) { }
+        const prev = packSelEl ? packSelEl.value : "";
+        // Option reconstruction never fires the change listener — restore a
+        // still-present custom selection manually.
+        if (packSelEl && prev && packNames.includes(prev)) packSelEl.value = prev;
+        if (rerenderQuick) rerenderQuick();
+    }
     function t(key, vars) {
         let text = MESSAGES[locale][key];
         if (text === undefined) text = MESSAGES["zh-CN"][key];
@@ -392,6 +419,17 @@ export const WEB_CLIENT = `(function () {
         return html;
     }
     window.bili_hostPluginBanner = bili_hostPluginBanner;
+    // #5079: one-time-per-instance upgrade notice — prompt_cache_key
+    // self-stamping is off by default now. Server decides active (effective
+    // routing "disabled" && not dismissed); pure builder, same test-seam
+    // convention as the banners above.
+    function bili_pckNoticeBanner(s) {
+        let html = '<div class="banner-title">' + escapeHtml(s.on) + "</div>";
+        html += '<div class="alert-row"><span>' + escapeHtml(s.desc) + '</span><button class="btn sm pck-notice-dismiss">' + escapeHtml(s.dismiss) + "</button></div>";
+        html += '<div class="dim small" style="margin-top:6px">' + escapeHtml(s.hint) + "</div>";
+        return html;
+    }
+    window.bili_pckNoticeBanner = bili_pckNoticeBanner;
     function $(id) { return document.getElementById(id); }
     function toast(message, kind) {
         const host = $("toast-host");
@@ -1298,18 +1336,14 @@ function changelogCatOf(rawLine) {
             if (sp && typeof sp.pid === "number") {
                 spb.hidden = false;
                 spb.classList.add("show");
-                // #3923/#3959: a known bili instance of a DIFFERENT lane sharing
-                // the machine-global sessions dir is the supported topology —
-                // informational styling, not a corruption alarm.
-                if (sp.benign === true) {
-                    spb.classList.remove("warn");
-                    spb.classList.add("info");
-                    spb.innerHTML = "<strong>" + escapeHtml(t("sys.storage_second_process_cross_lane_title")) + "</strong> " + escapeHtml(t("sys.storage_second_process_cross_lane", { pid: String(sp.pid), lane: typeof sp.lane === "string" && sp.lane ? sp.lane : t("sys.split_brain_lane_undeclared") }));
-                } else {
-                    spb.classList.remove("info");
-                    spb.classList.add("warn");
-                    spb.innerHTML = "<strong>" + escapeHtml(t("sys.storage_second_process_title")) + "</strong> " + escapeHtml(t("sys.storage_second_process", { pid: String(sp.pid) }));
-                }
+                // #5082: several instances opening one index.db is the
+                // supported topology — informational styling, never a
+                // corruption alarm. The real hazard (two instances writing
+                // the SAME session) has its own banner via the #3923
+                // split-brain contest.
+                spb.classList.remove("warn");
+                spb.classList.add("info");
+                spb.innerHTML = "<strong>" + escapeHtml(t("sys.storage_second_process_shared_title")) + "</strong> " + escapeHtml(t("sys.storage_second_process_shared", { pid: String(sp.pid), lane: typeof sp.lane === "string" && sp.lane ? sp.lane : t("sys.split_brain_lane_undeclared") }));
             } else {
                 spb.hidden = true;
                 spb.classList.remove("show");
@@ -1325,10 +1359,12 @@ function changelogCatOf(rawLine) {
                 sbb.hidden = false;
                 sbb.classList.add("show");
                 const laneOf = (x) => (x && typeof x.lane === "string" && x.lane ? x.lane : t("sys.split_brain_lane_undeclared"));
+                // #4626: .slice(0, 8) of "session-…" is literally "session-" — show enough to tell sessions apart
+                const shortSid = sb.sessionId.length > 24 ? sb.sessionId.slice(0, 24) + "…" : sb.sessionId;
                 sbb.innerHTML = "<strong>" + escapeHtml(t("sys.split_brain_title")) + "</strong> "
                     + escapeHtml(t("sys.split_brain", {
-                        title: typeof sb.title === "string" && sb.title ? sb.title : sb.sessionId.slice(0, 8),
-                        sid: sb.sessionId.slice(0, 8),
+                        title: typeof sb.title === "string" && sb.title ? sb.title : shortSid,
+                        sid: shortSid,
                         selfPid: String(sb.self.pid),
                         selfLane: laneOf(sb.self),
                         peerPid: String(sb.peer.pid),
@@ -1445,6 +1481,21 @@ function changelogCatOf(rawLine) {
                 ab.innerHTML = "";
             }
         }
+        // #5221 phase 2 (owner ruling 2026-10-31): persistent local-resolver
+        // wedge — detection-only alarm banner beside the defect advisory.
+        const wb = $("resolver-wedge-banner");
+        if (wb) {
+            const w = d.resolverWedge;
+            if (w && w.tripped) {
+                wb.hidden = false;
+                wb.classList.add("show");
+                wb.innerHTML = '<strong>' + t("wedge.on") + '</strong> <span class="mono">' + w.hosts.join(", ") + '</span>' + t("wedge.desc") + t("wedge.hint");
+            } else {
+                wb.hidden = true;
+                wb.classList.remove("show");
+                wb.innerHTML = "";
+            }
+        }
         const pb = $("plugin-advisory-banner");
         if (pb) {
             const advs = Array.isArray(d.pluginAdvisories) ? d.pluginAdvisories : [];
@@ -1504,6 +1555,36 @@ function changelogCatOf(rawLine) {
                 hb.hidden = true;
                 hb.classList.remove("show");
                 hb.innerHTML = "";
+            }
+        }
+        // #5079: prompt_cache_key default-off upgrade notice — dismissal is
+        // server-side (POST /__bili/notices/dismiss) so one close silences
+        // every browser; the banner re-renders from the refetched overview.
+        const nb = $("pck-notice-banner");
+        if (nb) {
+            const pn = d.pckNotice && typeof d.pckNotice === "object" ? d.pckNotice : null;
+            if (pn && pn.active === true) {
+                nb.hidden = false;
+                nb.classList.add("show");
+                nb.innerHTML = bili_pckNoticeBanner({ on: t("pckoff.on"), desc: t("pckoff.desc"), hint: t("pckoff.hint"), dismiss: t("pckoff.dismiss_btn") });
+                for (const btn of Array.from(nb.querySelectorAll(".pck-notice-dismiss"))) {
+                    btn.addEventListener("click", async () => {
+                        busy(btn, true);
+                        try {
+                            await json(API_ROOT + "/notices/dismiss", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: typeof pn.id === "string" ? pn.id : "" }) });
+                            toast(t("pckoff.dismissed"), "ok");
+                            await loadOverview(true);
+                        } catch (e) {
+                            toast(e.message, "err");
+                        } finally {
+                            busy(btn, false);
+                        }
+                    });
+                }
+            } else {
+                nb.hidden = true;
+                nb.classList.remove("show");
+                nb.innerHTML = "";
             }
         }
         // #1682: global upstream-connection alert banner — visible on every view,
@@ -3580,7 +3661,11 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
 
     async function loadConfig() {
         try {
-            const cfg = await json(API_ROOT + "/config");
+                        const cfg = await json(API_ROOT + "/config");
+            // #5319/#5328: refresh the resolved pack inventory (+ per-name
+            // source + user-pack dir) so the picker and the editor stay in
+            // sync with what is actually on disk.
+            refreshPackInventory();
             const cfgPathEl = $("cfg-path");
             if (cfgPathEl) cfgPathEl.textContent = cfg.path || t("common.empty");
             const fileBtn = $("copy-cfg-file");
@@ -3787,7 +3872,7 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
             abRow.inp.checked = ab ? ab.enabled === true : false;
             const pv = (cp && typeof cp.promptPack === "string") ? cp.promptPack : "default";
             while (packSel.options.length > 0) packSel.removeChild(packSel.lastChild);
-            ["default", "lean"].forEach((name) => {
+            (packNames.length ? packNames : ["default", "lean"]).forEach((name) => {
                 const o = document.createElement("option");
                 o.value = name;
                 o.textContent = name;
@@ -3801,6 +3886,22 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
             }
             packSel.value = pv;
             updatePackNote();
+            const pcv = (draft.promptCache && typeof draft.promptCache === "object" && !Array.isArray(draft.promptCache) && typeof draft.promptCache.routing === "string") ? draft.promptCache.routing : "disabled";
+            while (pckSel.options.length > 0) pckSel.removeChild(pckSel.lastChild);
+            PCK_VALUES.forEach((name) => {
+                const o = document.createElement("option");
+                o.value = name;
+                o.textContent = name;
+                pckSel.appendChild(o);
+            });
+            if (!PCK_VALUES.includes(pcv)) {
+                const o = document.createElement("option");
+                o.value = pcv;
+                o.textContent = pcv + " *";
+                pckSel.appendChild(o);
+            }
+            pckSel.value = pcv;
+            updatePckNote();
             nudge.value = String(cp && typeof cp.nudgeGrowthTokens === "number" ? cp.nudgeGrowthTokens : NUDGE_DEFAULT);
             updateNudgeNote();
             refreshTierInputs();
@@ -3924,18 +4025,169 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
         plab.textContent = t("cfg.q_pack");
         pw.appendChild(plab);
         pw.appendChild(packSel);
+        packSelEl = packSel;
+        rerenderQuick = () => syncAll();
         box.appendChild(pw);
         const packNote = document.createElement("div");
         packNote.style.cssText = "margin:-6px 0 4px;font-size:12px;color:#57606a";
         function updatePackNote() {
             if (packSel.value === "lean") packNote.textContent = t("cfg.q_pack_lean_desc");
             else if (packSel.value === "default") packNote.textContent = t("cfg.q_pack_default_desc");
+            else if (packSel.value === "chat") packNote.textContent = t("cfg.q_pack_chat_desc");
             else packNote.textContent = t("cfg.q_pack_custom");
         }
         box.appendChild(packNote);
+        // #5328: user-dir pack management — 新建/编辑/删除 under the dir the
+        // server reported via GET /__bili/packs (userDir). Builtin/shipped
+        // packs are read-only here; guidance says "override with a same-named
+        // file" instead of pretending they can be edited in place.
+        const pmRow = document.createElement("div");
+        pmRow.style.cssText = "margin:4px 0 2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+        const pmName = document.createElement("input");
+        pmName.type = "text";
+        pmName.className = "field-input mono";
+        pmName.placeholder = t("cfg.q_pack_name_ph");
+        pmName.style.cssText = "width:200px";
+        const pmNew = document.createElement("button");
+        pmNew.className = "btn sm";
+        pmNew.textContent = t("cfg.q_pack_new");
+        const pmEdit = document.createElement("button");
+        pmEdit.className = "btn sm";
+        pmEdit.textContent = t("cfg.q_pack_edit");
+        const pmDel = document.createElement("button");
+        pmDel.className = "btn sm";
+        pmDel.textContent = t("cfg.q_pack_del");
+        const pmStatus = document.createElement("span");
+        pmStatus.style.cssText = "flex-basis:100%;font-size:12px;color:#57606a";
+        pmRow.append(pmName, pmNew, pmEdit, pmDel, pmStatus);
+        const peBox = document.createElement("div");
+        peBox.hidden = true;
+        peBox.style.cssText = "margin:4px 0";
+        const peTa = document.createElement("textarea");
+        peTa.className = "editor mono codebox";
+        peTa.spellcheck = false;
+        peTa.rows = 10;
+        peTa.placeholder = '{\\n  "promptSections": {\\n    "philosophy": "…"\\n  }\\n}';
+        const peBtns = document.createElement("div");
+        peBtns.style.cssText = "margin-top:6px;display:flex;gap:8px";
+        const peSave = document.createElement("button");
+        peSave.className = "btn sm";
+        peSave.textContent = t("cfg.q_pack_save");
+        const peCancel = document.createElement("button");
+        peCancel.className = "btn sm";
+        peCancel.textContent = t("cfg.q_pack_cancel");
+        peBtns.append(peSave, peCancel);
+        peBox.append(peTa, peBtns);
+        box.append(pmRow, peBox);
+        let editingPack = "";   // "" = closed; otherwise the name being edited
+        let editingNew = false;
+        function pmSet(text, isError) {
+            pmStatus.textContent = text || "";
+            pmStatus.style.color = isError ? "#cf222e" : "#57606a";
+        }
+        function selectedIsUserPack(name) {
+            return packUserDir !== "" && String(packSources[name] || "").startsWith(packUserDir);
+        }
+        pmNew.addEventListener("click", () => {
+            editingPack = "";
+            editingNew = true;
+            pmName.value = "";
+            peTa.value = '{\\n  "promptSections": {\\n    "philosophy": ""\\n  }\\n}\\n';
+            peBox.hidden = false;
+            pmSet("");
+        });
+        pmEdit.addEventListener("click", async () => {
+            const name = packSel.value;
+            if (!name || name === "default") { pmSet(t("cfg.q_pack_ro_default"), true); return; }
+            if (!selectedIsUserPack(name)) {
+                const src = String(packSources[name] || "");
+                pmSet(src.startsWith("file:") ? t("cfg.q_pack_ro_project") : t("cfg.q_pack_ro_builtin"), true);
+                return;
+            }
+            try {
+                const r = await json(API_ROOT + "/packs/user/" + encodeURIComponent(name));
+                peTa.value = r && typeof r.json === "string" && r.json ? r.json : "{}\\n";
+                editingPack = name;
+                editingNew = false;
+                pmName.value = name;
+                peBox.hidden = false;
+                pmSet("");
+            } catch (e) { pmSet(String(e), true); }
+        });
+        pmDel.addEventListener("click", async () => {
+            const name = packSel.value;
+            if (!selectedIsUserPack(name)) { pmSet(t("cfg.q_pack_ro_del"), true); return; }
+            if (typeof confirm === "function" && !confirm(t("cfg.q_pack_confirm_del", { name }))) return;
+            try {
+                await json(API_ROOT + "/packs/user/" + encodeURIComponent(name), { method: "DELETE" });
+                pmSet(t("cfg.q_pack_deleted"));
+                refreshPackInventory();
+            } catch (e) { pmSet(String(e), true); }
+        });
+        peCancel.addEventListener("click", () => {
+            peBox.hidden = true;
+            editingPack = "";
+            editingNew = false;
+            pmSet("");
+        });
+        peSave.addEventListener("click", async () => {
+            // No regex literals with backslashes here (WEB_CLIENT template):
+            // strip one leading path separator via charCode instead.
+            const rawName = (editingNew ? pmName.value.trim() : editingPack);
+            const first = rawName.charCodeAt(0);
+            const name = (first === 47 || first === 92 ? rawName.slice(1) : rawName).trim();
+            if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || name.includes("..")) { pmSet(t("cfg.q_pack_bad_name"), true); return; }
+            let parsed;
+            try { parsed = JSON.parse(peTa.value); } catch (e) { pmSet(t("cfg.q_pack_bad_json", { err: String(e) }), true); return; }
+            try {
+                await json(API_ROOT + "/packs/user/" + encodeURIComponent(name), {
+                    method: "PUT",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ json: JSON.stringify(parsed, null, 2) }),
+                });
+                pmSet(t("cfg.q_pack_saved", { name }));
+                peBox.hidden = true;
+                editingPack = "";
+                editingNew = false;
+                refreshPackInventory();
+                commit((d) => { if (!compressOf(d)) d.compress = {}; d.compress.promptPack = name; });
+            } catch (e) { pmSet(String(e), true); }
+        });
         packSel.addEventListener("change", () => commit((d) => {
             if (!compressOf(d)) d.compress = {};
             if (packSel.value === "default") delete d.compress.promptPack; else d.compress.promptPack = packSel.value;
+        }));
+        // #5079: prompt_cache_key self-stamping switch — the single knob that
+        // decides whether bili writes its own prompt_cache_key on egress.
+        // Values map 1:1 onto the config file (promptCache.routing), so this
+        // control and the raw JSON editor below stay in sync through commit().
+        const PCK_VALUES = ["disabled", "auto", "enabled"];
+        const pckSel = document.createElement("select");
+        pckSel.className = "field-input mono";
+        qCtrls.push(pckSel);
+        const pkw = document.createElement("div");
+        pkw.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+        const pklab = document.createElement("label");
+        pklab.htmlFor = "quick-pck";
+        pklab.style.cssText = "flex:0 1 auto;max-width:520px";
+        pklab.textContent = t("cfg.q_pck");
+        pckSel.id = "quick-pck";
+        pkw.appendChild(pklab);
+        pkw.appendChild(pckSel);
+        box.appendChild(pkw);
+        const pckNote = document.createElement("div");
+        pckNote.style.cssText = "margin:-6px 0 4px;font-size:12px;color:#57606a";
+        function updatePckNote() {
+            if (pckSel.value === "disabled") pckNote.textContent = t("cfg.q_pck_disabled_desc");
+            else if (pckSel.value === "auto") pckNote.textContent = t("cfg.q_pck_auto_desc");
+            else if (pckSel.value === "enabled") pckNote.textContent = t("cfg.q_pck_enabled_desc");
+            else pckNote.textContent = t("cfg.q_pck_custom");
+        }
+        box.appendChild(pckNote);
+        pckSel.addEventListener("change", () => commit((d) => {
+            const pc = (d.promptCache && typeof d.promptCache === "object" && !Array.isArray(d.promptCache)) ? d.promptCache : {};
+            if (PCK_VALUES.includes(pckSel.value)) pc.routing = pckSel.value; else delete pc.routing;
+            if (Object.keys(pc).length === 0) delete d.promptCache; else d.promptCache = pc;
         }));
         const nudge = document.createElement("input");
         nudge.type = "number";
