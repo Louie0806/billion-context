@@ -368,7 +368,7 @@ test("#4666 mysql: v8 upgrade collapses duplicates, crash-safe stamp gate, retir
         const H = await createMysqlHarness(t);
         let be: StorageBackend | undefined;
         try {
-            // Fresh install lands at v9.
+            // Fresh install lands at v10.
             be = await openBackend("mysql", H.dsn);
             await be.init?.();
             assert.equal(await H.stamp(), String(STORAGE_SCHEMA_VERSION), "fresh install stamped the current version");
