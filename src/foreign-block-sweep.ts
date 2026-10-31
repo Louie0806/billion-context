@@ -21,7 +21,7 @@ import type { SessionStore } from "./persist.js";
  * lineage field). Policy lives here, out of the storage engine.
  */
 
-export interface ForeignBlockFinding {
+interface ForeignBlockFinding {
     sessionId: string;
     blockId: string;
     tier: number;
@@ -39,7 +39,7 @@ export interface ForeignBlockPlan {
     noCovered: ForeignBlockFinding[];
 }
 
-export interface ForeignBlockApplyResult {
+interface ForeignBlockApplyResult {
     archived: ForeignBlockFinding[];
     failed: { finding: ForeignBlockFinding; reason?: string }[];
 }
