@@ -74,6 +74,10 @@ import { DEFAULT_DECIDE_MAX_TOKENS } from "../nudge-decide.js";
 import { BodyTooLargeError, buildForwardTarget, forward, forwardUpstreamUrl, googleModelFromPath, googlePathKind, headroomEffectiveLogged, headroomFallbackLogged, headerValue, imageBillingFor, imageReserveFor, imageTokenCapFor, isCountTokensRequest, isPreflightFailFast, logRequestCost, NON_CONVERSATION_RELAY_WARN_CAP, nonConversationRelayWarned, prepareCountTokens, preflightCompressIfNeeded, readBody, resolveKnownOutputCeiling, resolveUpstream, resignSettingsFor, selfAddressedLocalPath, scrubAnthropicPck, scrubCompatDrop, vertexAnthropicModelFromPath, warnRouteMissIfNew, type Prepared } from "../server.js";
 import { normalizeVertexModelId } from "../vertex.js";
 
+// #5243: warn-once per model when the live codex model table is unavailable and
+// window sizing falls back to config.toml model_context_window.
+const codexConfigWindowWarned = new Set<string>();
+
 // #2986: the derivedFromSessionId link is what keeps a kind child session
 // reachable along its parent chain after a restart — without it the shared
 // prefix is re-sent whole and over-window requests 503 (the #2985 failure). It
@@ -821,12 +825,16 @@ async function handleRequest(
             const aligned = operatorWindowTuned
                 ? { limit: reqConfig.modelContextLimit, clamped: false }
                 : codexAlignedWindow(reqConfig.modelContextLimit, model, req.headers, pluginWindow ?? runtimeWindow ?? launcherWindow);
+            if (!operatorWindowTuned && aligned.source === "codex-config-window" && !codexConfigWindowWarned.has(model)) {
+                codexConfigWindowWarned.add(model);
+                log("warn", `[codex] model=${model}: no live model table readable under ${process.env.CODEX_HOME || "~/.codex"} (model_catalog_json / models_cache.json missing or invalid) — aligning against config.toml model_context_window; copy your catalog into $CODEX_HOME/models_cache.json for exact sizing`);
+            }
             if (aligned.clamped) {
                 const before = reqConfig.modelContextLimit;
                 reqConfig = { ...reqConfig, modelContextLimit: aligned.limit };
                 nativeFromFallback = false;
                 windowShrinkReason = "codex";
-                log("info", `[codex] effective window clamped ${before} → ${aligned.limit} (client-window alignment for model=${model}; current client metadata preferred over bundled fallback) upstream=${embeddedUrl ? hostIdForLog(embeddedUrl) : "none"} route=${routeLabel}`);
+                log("info", `[codex] effective window clamped ${before} → ${aligned.limit} (window source=${aligned.source} for model=${model}) upstream=${embeddedUrl ? hostIdForLog(embeddedUrl) : "none"} route=${routeLabel}`);
             } else if (operatorWindowTuned && native !== undefined && reqConfig.modelContextLimit < native) {
                 windowShrinkReason = "operator";
             }
