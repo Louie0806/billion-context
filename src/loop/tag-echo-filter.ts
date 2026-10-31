@@ -306,35 +306,16 @@ const PROTOCOL_TAG_NAMES = new Set([
 ]);
 const CANONICAL_TAG_ALT =
     "(?:" + [...HTML_TAG_NAMES, ...PROTOCOL_TAG_NAMES].join("|") + ")";
-const DRIFT_EMPTY = new RegExp("\\x3c(?!(?:" + NAME + ")[\\s>/])(?!" + HTML_TAG_ALT + "\\b)" + DRIFT_NAME_SRC + "\\s*>\\s*\\x3c\\/\\1\\s*>", "gi");
-function stripEmptyPairs(text: string): string {
-    if (!text.includes("\x3c/")) return text;
-    return text.replace(new RegExp(DRIFT_EMPTY.source, "gi"), (whole, name: string) =>
-        (HTML_TAG_NAMES.has(name.toLowerCase()) || PROTOCOL_TAG_NAMES.has(name.toLowerCase())) ? whole : "");
-}
-/** The same empty-body unit when the two halves disagree on the name —
- *  `<acpt> </apct>`. A balanced render tag never does that; an emitter
- *  guessing at its own tag name does, and the reported paragraph carries one.
- *  Both names must be non-HTML, so a genuine (if malformed) `<div></span>`
- *  survives. */
-const DRIFT_EMPTY_MISMATCH = new RegExp(
-    "\\x3c(?!(?:" + NAME + ")[\\s>/])(?!" + HTML_TAG_ALT + "\\b)" +
-    DRIFT_NAME_SRC + "\\s*>\\s*\\x3c\\/(?!" + HTML_TAG_ALT + "\\b)([A-Za-z][A-Za-z0-9_]{0,31})\\s*>",
-    "gi",
-);
-function stripEmptyMismatch(text: string): string {
-    if (!text.includes("\x3c/")) return text;
-    return text.replace(new RegExp(DRIFT_EMPTY_MISMATCH.source, "gi"), (whole, open: string, close: string) =>
-        (HTML_TAG_NAMES.has(open.toLowerCase()) || PROTOCOL_TAG_NAMES.has(open.toLowerCase())) || (HTML_TAG_NAMES.has(close.toLowerCase()) || PROTOCOL_TAG_NAMES.has(close.toLowerCase())) ? whole : "");
-}
 /** #5175 second shape: the SAME emitter attributes (`tokens=`) with a body of
  *  bare refs, but the closing name disagrees with the opening one —
  *  `<actp tokens="80">m08844</action>`. `DRIFT_PAIR` and `DRIFT_ATTR` both carry
- *  a `\1` backreference, so they require the two halves to agree; the empty-body
- *  rule below covers only a body with nothing in it. This shape therefore had no
- *  owner at all and reached the client verbatim (measured on the shipped corpus:
- *  six fields, 57 units, e.g. `<tool_call tokens="0" text">m10246</acptokens>`
- *  and `<actp tokens="57" type="text">m08313</actxt>`).
+ *  a `\1` backreference, so they require the two halves to agree; the former
+ *  empty-body rule covered only a body with nothing in it (#5179 removed it —
+ *  a same-name empty pair is valid XML and appears in real content). This shape
+ *  therefore had no owner at all and reached the client verbatim (measured on the
+ *  shipped corpus: six fields, 57 units, e.g.
+ *  `<tool_call tokens="0" text">m10246</acptokens>` and
+ *  `<actp tokens="57" type="text">m08313</actxt>`).
  *
  *  Deliberately STRIPS THE SPAN ONLY and does NOT license orphan-half removal:
  *  an open name here can be a genuine tool-call name (`tool_call`), and proving
@@ -360,7 +341,7 @@ function stripAttrMismatch(text: string): string {
  *
  *  Why every earlier rule missed it: `DRIFT_PAIR`/`DRIFT_ATTR` match a bare-ref
  *  or `tokens=` attribute, but both carry a `\1` backreference, so the opening
- *  and closing names must AGREE. `DRIFT_EMPTY_MISMATCH` allows them to disagree
+ *  and closing names must AGREE. the removed empty-body rule allowed them to disagree
  *  but only for an EMPTY attribute slot. `DRIFT_ATTR_MISMATCH` allows
  *  disagreement and a ref body but demands `tokens=`. So "bare-ref attribute +
  *  disagreeing close" — the reported unit — had no owner and reached the client
@@ -798,7 +779,7 @@ function stripPass(text: string, dropToolCallEmission: boolean, requestText: str
     // already claimed everything it recognises; what reaches here is exactly the
     // drift this pass exists for. `attested || out !== text` mirrors
     // DEAD_REF_CLOSE's gate (#1760).
-    out = stripBareMismatch(stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(out, attested || out !== text)))));
+    out = stripBareMismatch(stripAttrMismatch(stripDriftPairs(out, attested || out !== text)));
     return stripBiliArtifacts(out);
 }
 
@@ -820,7 +801,7 @@ const STRIP_PASS_CAP = 8;
  *  land in different pushes is left alone rather than guessed at — matching
  *  #1720's documented behaviour, never widening it. */
 export function stripDriftResidue(text: string): string {
-    return stripBareMismatch(stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(text, false)))));
+    return stripBareMismatch(stripAttrMismatch(stripDriftPairs(text, false)));
 }
 /** Whole-text ACP artifact strip. Returns a FIXED POINT whenever the exposure
  *  cascade settles within STRIP_PASS_CAP passes (all attested shapes and every
@@ -1614,9 +1595,8 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
             // push at a time, and the client renders the imitation verbatim.
             DRIFT_PAIR.lastIndex = 0;
             DRIFT_ATTR.lastIndex = 0;
-            DRIFT_EMPTY.lastIndex = 0;
             DRIFT_ATTR_MISMATCH.lastIndex = 0;
-            const dp = DRIFT_PAIR.exec(buf) ?? DRIFT_ATTR.exec(buf) ?? DRIFT_EMPTY.exec(buf) ?? DRIFT_ATTR_MISMATCH.exec(buf);
+            const dp = DRIFT_PAIR.exec(buf) ?? DRIFT_ATTR.exec(buf) ?? DRIFT_ATTR_MISMATCH.exec(buf);
             // Orphan unit (#2023): only reached when no opening is live — a
             // close inside a swallow belongs to that pair's content (#1720).
             // The lookbehind class extends across the chunk boundary: a run at

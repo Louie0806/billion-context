@@ -271,10 +271,14 @@ const PARITY_SHAPES: Array<[string, string]> = [
     ["attribute-slot pair", "<acpt m17138></acpt>"],
     ["two pairs, text between", "<acpt m17138></acpt> between <apct m17140></apct>"],
     ["emitter attribute pair", '<acct tokens="0" text="text">m00257</acct>'],
-    ["empty-body pair", "<acpt> </acpt>"],
     ["genuine html", '<div class="x">hello world</div>'],
     ["genuine html with ref", "<account>m00375</account>"],
     ["documented residual", "m01233</kem>"],
+    // #5179: an empty SAME-name pair is valid XML and appears in real content
+    // (a driver-repository response body, a paper quoting <answer></answer>).
+    // It is not emitter evidence, so both lanes must leave it byte-identical.
+    ["genuine xml empty pair", "Repository header:\n\x3cfields\x3e\n\t\n\x3c/fields\x3e\n\x3cpage\x3e1\x3c/page\x3e"],
+    ["genuine xml answer pair", "Reasoning goes in \x3cthink\x3e\x3c/think\x3e and the answer in \x3canswer\x3e\x3c/answer\x3e tags."],
 ];
 
 // Two shapes cannot be fixed from the streaming lane and are pinned here as a
@@ -315,6 +319,8 @@ const MUST_PRESERVE = new Set([
     "genuine html",
     "genuine html with ref",
     "documented residual",
+    "genuine xml empty pair",
+    "genuine xml answer pair",
 ]);
 
 for (const [name, text] of PARITY_SHAPES) {
@@ -325,7 +331,12 @@ for (const [name, text] of PARITY_SHAPES) {
             const got = streamChunked(text, size);
             seen.push(got);
             if (MUST_PRESERVE.has(name)) {
-                assert.equal(got, truth, `chunk size ${size}: ${JSON.stringify(got)} !== ${JSON.stringify(truth)}`);
+                // Genuine content is not merely consistent across lanes: the
+                // SOURCE text must survive intact. Comparing got to truth alone
+                // is too weak — if both lanes over-strip the same way the test
+                // still passes (caught by the #5179 negative control).
+                assert.equal(got, text, `chunk size ${size}: genuine content was rewritten: ${JSON.stringify(got)} !== ${JSON.stringify(text)}`);
+                assert.equal(truth, text, `whole-text pass rewrote genuine content: ${JSON.stringify(truth)} !== ${JSON.stringify(text)}`);
                 continue;
             }
             // Echo shapes: no citation may leak, and removing the drift-shaped
