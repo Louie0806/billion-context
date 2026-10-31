@@ -176,7 +176,6 @@ test("family gate: no raw negative string slices outside the allowlist", () => {
         ["src/conflict-watch.ts", [/events\.slice\(-10\)/]], // array receiver
         ["src/web/client.ts", [/conflicts\.slice\(-10\)/]], // array receiver (#2102 session-detail card)
         ["src/web/report.ts", [/lines\.slice\(-12\)/, /folds\.slice\(-15\)/]], // array receiver (#3099 session-report tables)
-        ["src/pack-install.ts", [/stderr\.trim\(\)\.split\("\\n"\)\.slice\(-3\)/]], // array receiver (#5340): keeps the last 3 STDERR LINES, not a string suffix
         ["src/text-safe.ts", [/\.slice\(/]], // the clamped implementation itself
     ]);
     const srcDir = path.join(import.meta.dirname, "..", "src");
