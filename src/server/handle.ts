@@ -33,7 +33,7 @@ import { enterSessionContext, log as loggerLog } from "../logger.js";
 import { codexCompactGatePre, codexCompactMode, hasCompactionTrigger, isCodexHost, replaceBiliCompactionItems } from "../codex-compact.js";
 import { emitPreflightError } from "../stream-error.js";
 import { agentProviderRecipes } from "../agent-providers.js";
-import { affinityToken, anthropicFirstUserFrag, claudeAnthropicPersonaOrderApplies, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, claudeSubagentLaneTokenOf, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity } from "../session-id.js";
+import { affinityToken, anthropicFirstUserFrag, claudeAnthropicPersonaOrderApplies, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, claudeSubagentLaneTokenOf, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity, zcodeMemoryConversation } from "../session-id.js";
 import { personaConversationOrder } from "../session-resolve.js";
 import { prefixAffinity, describeResumeMiss, type AnonymousAffinity } from "../prefix-affinity.js";
 import { buildAnonymousProvenance, type AnonymousProvenance } from "../anon-provenance.js";
@@ -53,7 +53,7 @@ import { buildForgeResponse, classifierForgeVariant, estimateCjkTokens, isAutoMo
 import { extractConversationId, isV1BackgroundSideRequest, isV1InternalRequest, unwrapV1Internal } from "../v1internal.js";
 import { anthropicBetaContextWindow, BILI_HOP_HEADER, capRegistryWindowByStandard, expandedContextSuffixWindow, launcherContextWindow, launcherMaxOutput, windowSourceLogged } from "./context-window.js";
 import { NO_IDENTITY_MESSAGE, safeSessionId } from "./headers.js";
-import { demoteGate, hasLeakedBiliToolsOnly, isDshAutoReviewRequest, isDshTitleRequest, isServerToolUtilityCall, isSideRequest, resolveSideLane, restoreOutputBudget, sideRequestGuard, stripLeakedBiliTools } from "./side-request.js";
+import { demoteGate, hasLeakedBiliToolsOnly, isClaudeCodeTitleRequest, isDshAutoReviewRequest, isDshTitleRequest, isServerToolUtilityCall, isSideRequest, resolveSideLane, restoreOutputBudget, sideRequestGuard, stripLeakedBiliTools } from "./side-request.js";
 import { DSH_COMPACTION_SHAPE_MSGS, DSH_REFUSAL_STORM_LOG_EVERY, detectPassthroughDshCompactionCall, dshCompactionRefusal, dshPassthroughGuardStats, isDshCompactionCall } from "./dsh-compaction-guard.js";
 import { buildDshCompactionForgeBody, renderDshAuthoredCheckpoint } from "./dsh-authored-compaction.js";
 import { artifactSeedHit, detectAcpArtifacts } from "./chain-artifacts.js";
@@ -1007,6 +1007,16 @@ async function handleRequest(
         // proxy-mode traffic never reaches it because the plugin header gate
         // fails first).
         const sideAgent = pluginRequestAgentHeader(req.headers);
+        // #5135: claude code session-title sidecar (proxy mode, header-less):
+        // fires ~1ms ahead of the first main turn under the SAME
+        // x-claude-code-session-id. Recognize it by shape so it neither claims
+        // the raw-key anchor in the #4774 order resolver (side requests resolve
+        // VERBATIM — #2156) nor touches kernel state downstream (#388
+        // passthrough). Evidence-per-client: gated on the claude-code
+        // conversation source — the exact population #4774 routes through the
+        // resolver — never opened globally.
+        const ccTitleSidecar = sideAgent !== "main" && claudeAnthropicPersonaOrderApplies(req.headers)
+            && isClaudeCodeTitleRequest(protocol, parsed);
         const sideRequestLike = !countTokens && !responsesCompact && protocol !== null
             && (isSideRequest(parsed, sideAgent)
                 // #2503: dsh title sidecar — its output budget grew past the
@@ -1025,6 +1035,9 @@ async function handleRequest(
                  // incident topology.
                  || (pluginAgentHeader(req.headers) === "dsh" && sideAgent !== "main"
                      && isDshAutoReviewRequest(protocol, parsed))
+                 // #5135: the claude code title sidecar stays off the raw-key
+                 // anchor claim and off the kernel pipeline entirely.
+                 || ccTitleSidecar
                  || (pluginAgentHeader(req.headers) !== undefined && sideAgent !== "main"
                      && req.headers["x-bili-ws-lane"] === undefined
                      && hasLeakedBiliToolsOnly(parsed)
@@ -1053,7 +1066,11 @@ async function handleRequest(
               : protocol === "google"
                 ? googleSystemText(parsed as GoogleRequestBody)
                 : "";
-        const conversation = protocol === "google"
+        const zcodeParentIdentity = responsesIdentity ?? openaiIdentity ?? anthropicIdentity ?? googleIdentity;
+        const zcodeMemory = zcodeParentIdentity?.clientProvided
+            ? zcodeMemoryConversation(zcodeParentIdentity.value, req.headers)
+            : undefined;
+        const conversation = zcodeMemory !== undefined ? zcodeMemory : protocol === "google"
             // #2730: the google lane is persona-aware too — dsh stamps its one
             // conversation id on every wire including gemini (`x-bili-plugin: dsh`
             // is wire-agnostic, dsh-native.ts; MODEL_API_SUFFIX routes google
@@ -1238,7 +1255,7 @@ async function handleRequest(
         // dsh-over-Responses (#2203/#2730); the explicit responses clause
         // below stays for the codex/claude instructions personas (codexTurn
         // keys verbatim and must not count).
-        const designNamespaced = personaForked
+        const designNamespaced = zcodeMemory !== undefined || personaForked
             || (protocol === "responses"
                 && codexTurn === undefined
                 && instructionsFingerprintApplies(req.headers)
@@ -1482,7 +1499,7 @@ async function handleRequest(
                 ...(anonAffinity.lineage ? { lineage: anonAffinity.lineage } : {}),
                 ...(existingProducer ? { producer: existingProducer } : anonProvenance ? { producer: anonProvenance } : {}),
             };
-        } else if (clientProvided) {
+        } else if (clientProvided && zcodeMemory === undefined) {
             // #1486: track identified clients' chains too, so a resume that
             // forks a NEW client id (cc --resume) can be matched back to its
             // parent across requests and proxy restarts (the #499 snapshot
@@ -1534,7 +1551,7 @@ async function handleRequest(
         // race-free. Fall back to the headless pending queue (codex spawn)
         // for the first request that creates a new session.
         let derivedParent: string | undefined;
-        if (!pluginAgent && !anonAffinity) {
+        if (!pluginAgent && !anonAffinity && zcodeMemory === undefined) {
             const identityAgent = consumePluginRegisterFor(clientConv ?? conversation);
             if (identityAgent) {
                 pluginAgent = identityAgent.agent;
@@ -1542,7 +1559,7 @@ async function handleRequest(
                 derivedParent = identityAgent.parentConversationId;
             }
         }
-        if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined) {
+        if (!pluginAgent && session.stats.requests === 0 && codexTurnIdentity(req.headers) === undefined && claudeSub === undefined && zcodeMemory === undefined) {
             // A codex subagent thread mints a fresh session too, but it must
             // not claim the ROOT conversation's pending register (the plugin
             // binding belongs to the root session, #317). Same for a split
@@ -1591,7 +1608,7 @@ async function handleRequest(
         // request is sent (#1214) — so consult it here too. Link-only: on
         // non-derived conversations parentConversationId is absent and this
         // is a no-op.
-        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity) {
+        if (derivedParent === undefined && pluginAgent !== undefined && pluginConversation !== undefined && !anonAffinity && zcodeMemory === undefined) {
             const stamped = consumePluginRegisterFor(pluginConversation);
             if (stamped?.parentConversationId !== undefined) derivedParent = stamped.parentConversationId;
         }
@@ -1608,7 +1625,7 @@ async function handleRequest(
             // dsh review persona split onto a `|sub:<fp>` session) gets the
             // same discipline — the fork records under its suffixed id and
             // the raw key stays owned by the main session.
-            recordPluginSession((claudeSub !== undefined || personaForked) ? conversation : (pluginConversation ?? conversation), session.id);
+            recordPluginSession((claudeSub !== undefined || personaForked || zcodeMemory !== undefined) ? conversation : (pluginConversation ?? conversation), session.id);
         }
         // #1206: first request of this session — identify the client and scan
         // its plugin registry for a co-resident THIRD-PARTY compression plugin
@@ -1633,6 +1650,15 @@ async function handleRequest(
             } catch (err) {
                 log("warn", `[conflict] third-party plugin scan failed: ${String(err)} (#1206)`);
             }
+        }
+        if (zcodeMemory !== undefined && zcodeParentIdentity !== undefined && session.stats.requests === 0) {
+            const parentId = zcodeParentIdentity.value;
+            session.metadata.derivedFrom = parentId;
+            session.metadata.derivedFromSessionId = parentId;
+            markDirty(session);
+            persistLineageLinkNow(session);
+            const parent = peekSession(parentId) ?? getStore().loadSync(parentId, { protocol, upstreamOrigin });
+            if (parent) maybeAdoptDerivedFork({ session, parent, protocol, parsed, upstreamOrigin, enabled: opts.resumeInheritance !== false, log });
         }
         // #1486: resume-fork inheritance for identified clients. Clients such
         // as Claude Code fork a FRESH client-provided session id on --resume
@@ -1783,7 +1809,7 @@ async function handleRequest(
         // kernel would have fallen to a per-request content fingerprint) — this
         // lookup binding remains for clients that send a real conversation
         // header or session_id.
-        if (protocol === "responses" || protocol === "openai" || protocol === "anthropic") {
+        if (zcodeMemory === undefined && (protocol === "responses" || protocol === "openai" || protocol === "anthropic")) {
             const pck = (parsed as { prompt_cache_key?: unknown }).prompt_cache_key;
             if (typeof pck === "string" && pck.trim().length > 0) {
                 recordPluginSession(pck.trim(), session.id);
@@ -1840,7 +1866,8 @@ async function handleRequest(
             markDirty(session);
             log("info", `[${sessionId}] [plugin] "${pluginAgent}" asked for the proxy compression channel (native tools are not in this request) — identity and budget stay plugin-bound`);
         }
-        const pluginMode = pluginAgent !== undefined && !pluginLaneDegraded(session) && !subagentFallback.present && !compressionProxy;
+        // Memory workers retain the parent's host-side tool binding, not the internal child id.
+        const pluginMode = zcodeMemory === undefined && pluginAgent !== undefined && !pluginLaneDegraded(session) && !subagentFallback.present && !compressionProxy;
         // [#1097/#1271] Stamp the resolved CCR policy. acp_retrieve needs a tool
         // channel that can round-trip the full original, so CCR arms only where
         // that channel exists and is resolvable: proxy mode always (the proxy
@@ -2115,7 +2142,10 @@ async function handleRequest(
         const dshReviewSidecar = requestAgent !== "main" && isDshAutoReviewRequest(protocol, parsed)
             && (pluginAgentHeader(req.headers) === "dsh"
                 || (typeof session.metadata.pluginAgent === "string" && session.metadata.pluginAgent === "dsh"));
-        const sideIntent = isSideRequest(parsed, requestAgent) || dshTitleSidecar || dshReviewSidecar;
+        // #5135: ccTitleSidecar joins the intent set so the title call rides
+        // the #388 passthrough (kernel state untouched) like every other
+        // recognized side request.
+        const sideIntent = isSideRequest(parsed, requestAgent) || dshTitleSidecar || dshReviewSidecar || ccTitleSidecar;
         // #388/#2157 follow-up: side requests must not touch kernel state under
         // a public-fork receipt either. The receipt's first-request check above
         // has already accepted this request (inherited prefix matched, or live
@@ -2139,7 +2169,7 @@ async function handleRequest(
         // #2500 server-tool utility shape) diverts under a receipt.
         // #2170 measure 1: the decision itself is resolveSideLane() (pure,
         // truth-table-tested); demotedSide ⊆ lane==="side" by construction.
-        const sideLane = resolveSideLane({ countTokens, responsesCompact, protocol, stripApplied: demotedSide, sideIntent, requestAgent, sideLabel: serverToolUtility ? "server-tool utility call (#2500)" : dshTitleSidecar ? "dsh title-gen sidecar (#2503)" : dshReviewSidecar ? "dsh auto-review sidecar (#4438)" : undefined });
+        const sideLane = resolveSideLane({ countTokens, responsesCompact, protocol, stripApplied: demotedSide, sideIntent, requestAgent, sideLabel: serverToolUtility ? "server-tool utility call (#2500)" : dshTitleSidecar ? "dsh title-gen sidecar (#2503)" : dshReviewSidecar ? "dsh auto-review sidecar (#4438)" : ccTitleSidecar ? "claude-code title-gen sidecar (#5135)" : undefined });
         if (sideLane.lane === "side") {
             // #554: the passthrough below skips EVERY input-side guard by design
             // (#388) — a full-history side request over the window is a
