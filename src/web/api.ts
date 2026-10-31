@@ -113,7 +113,7 @@ function userPackFile(name: string): string {
     return join(configDir(), "packs", `${name}.json`);
 }
 
-function packSurfaceHasContent(surface: ReturnType<typeof sanitizePackSurface>): boolean {
+export function packSurfaceHasContent(surface: ReturnType<typeof sanitizePackSurface>): boolean {
     return Object.entries(surface).some(([, value]) =>
         value !== undefined &&
         (typeof value !== "object" || value === null ? true : Object.keys(value).length > 0));
