@@ -690,7 +690,11 @@ async function forwardCaptured(
             const msgs = prepared.processedMessages.length > 0 ? prepared.processedMessages : prepared.originalMessages;
             noteForwardedImageFacts(prepared.session, {
                 nImages,
-                textSide: estimateCoreMessages(msgs) + estimateWireOverhead(prepared.protocol, (prepared.parsedBody as Record<string, unknown> | undefined) ?? wireBody),
+                // Overhead against the SENT bytes: parsedBody is the pre-shed memo and
+                // would drift from wireBody once an egress shed rewrites the body; when
+                // nothing was rewritten, measuring the serialized bytes is exactly what
+                // pre-#5131 measured — one fewer branch, identical value.
+                textSide: estimateCoreMessages(msgs) + estimateWireOverhead(prepared.protocol, wireBody),
                 host: upstreamHost(learnUpstream),
                 fp: `${imageBillingFor(opts, learnUpstream)}:${imageTokenCapFor(opts, learnUpstream)}`,
             });
