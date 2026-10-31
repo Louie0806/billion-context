@@ -102,7 +102,10 @@ test("#5103: explicit attachUrl target found but build-incompatible — refusal 
     const notice = stderrLines.find((l) => l.includes(`explicit attach target ${ORIGIN}`));
     assert.ok(notice, "the visible channel must name the refused explicit target");
     assert.ok(notice!.includes("code-fingerprint-mismatch"), notice);
-    assert.ok(notice!.includes("restart the host once its copy converges to the same version"), notice);
+    // #4125 rewrote this remedy: a strictly newer same-lane holder is now adopted
+    // rather than deadlocked around, so the wording no longer promises "the same
+    // version" — pin the stable remedy fragment instead of the old sentence.
+    assert.ok(notice!.includes("restart the host once its copy converges"), notice);
     assert.ok(diags.some((d) => d.includes(`explicit attach target ${ORIGIN}`)), "the durable log gets the same line");
 });
 

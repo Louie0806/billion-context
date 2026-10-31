@@ -17,13 +17,14 @@
 // overwrite of user config). Writes go through the temp-file+rename
 // pattern shared with every other writer here.
 
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isValidPackName, sanitizePackSurface, type PromptPackFile } from "acp-kernel";
 import { configDir } from "./paths.js";
+import { planDshSpawn } from "./dsh-channel.js";
 import { packSurfaceHasContent } from "./web/api.js";
 
 /** The file an npm package must ship to be installable as a pack. */
@@ -107,9 +108,25 @@ export function installPackFromNpm(spec: string, options: PackInstallOptions = {
     try {
         let stderr = "";
         try {
-            execFileSync("npm", [
-                "install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed,
-            ], { timeout: NPM_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
+            // #5340: `npm` is `npm.cmd` on Windows, which CreateProcess cannot
+            // execute directly — a bare execFileSync("npm", …) fails there with
+            // ENOENT ("npm was not found on PATH"). planDshSpawn applies the same
+            // cmd.exe /d /s /c wrap the launcher/pi/dsh lanes already use.
+            const npmArgs = ["install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed];
+            const plan = planDshSpawn("npm", npmArgs);
+            const res = spawnSync(plan.command, plan.args, {
+                timeout: NPM_TIMEOUT_MS,
+                stdio: ["ignore", "pipe", "pipe"],
+                windowsVerbatimArguments: plan.windowsVerbatimArguments,
+                windowsHide: true,
+            });
+            if (res.error) throw res.error;
+            if (res.status !== 0 && res.status !== null) {
+                const err = new Error(`exit ${res.status}`);
+                Object.assign(err, { status: res.status, stderr: typeof res.stderr === "string" ? res.stderr : "" });
+                throw err;
+            }
+            stderr = typeof res.stderr === "string" ? res.stderr : "";
         } catch (error) {
             const err = error as { stderr?: unknown; message?: string };
             stderr = typeof err.stderr === "string" ? err.stderr : "";
