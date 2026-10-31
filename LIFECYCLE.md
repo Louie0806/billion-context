@@ -72,6 +72,7 @@
 | `BILI_STRICT_PORT` | `=1` claude SessionStart hook 退出端口重试（#964） |
 | `BILI_OPENCODE_ACP_SPEC` | 剥离版 ACP spec 临时配置**文件路径**提示 |
 | `BILI_LAUNCHER_LANE` | lane 身份戳（attach 时比对归属） |
+| `BILI_SPAWN_FINGERPRINT` | #4125 spawn 方算出的入口脚本 sha256，随环境传给子进程；子进程优先信任它而不是重新哈希（避免 spawn 窗口内 in-place 更新导致两侧 digest 不一致）。格式不是 64 位十六进制或缺失时回退本地重算 |
 | `BILI_LAUNCHER_MODEL_WINDOWS` / `BILI_LAUNCHER_MODEL_MAX_OUTPUTS` | 模型窗口/输出上限 JSON，传给子进程对齐 nudge 分母与输出预留 |
 | `BILI_INHERITED_HTTP_PROXY` / `BILI_INHERITED_HTTPS_PROXY` / `BILI_INHERITED_ALL_PROXY` / `BILI_INHERITED_NO_PROXY` | 继承调用方代理设置转发给 proxy 子进程 |
 | `BILI_MITM_HOSTS` / `BILI_MITM_DOMAINS` | MITM 主机/域名单传给子进程 |
@@ -123,6 +124,7 @@
 | `BILI_SESSION_GC_INTERVAL_MS` / `BILI_SESSION_GC_MAX_AGE_DAYS` / `BILI_SESSION_GC_MAX_TOKENS` | 会话 GC 参数（默认 1h / 7d / 1M tokens） |
 | `BILI_SESSION_RESIDENT_MAX_BYTES` | sessions.residentMaxBytes，512 MiB 软上限（#2803） |
 | `BILI_SESSION_RESIDENT_HARD_MAX_BYTES` | sessions.hardMaxBytes，单会话驻留字节硬上限（#4788 D1-A）；默认同 residentMaxBytes（512 MiB），设 0 关闭——补软上限对唯一活跃会话的盲区 |
+| `BILI_SESSION_CONTENT_STORE_PIN` | `=1/true` 把每个会话的 CCR content store（`{byRef}/{byHash}` 原文）常驻内存，save 落盘后不折叠（#4788 phase 2 / discussion #3916-E）；首次触达时从 unified ccr mirror 或 `.content-store.json` sidecar 重新物化（payload-first 写序，#2674）。未设/0/false/其它值 = 折叠（默认） |
 | `BILI_SESSION_WARM_MAX_BYTES` | warm 解码字节上限，64 MiB（#2803） |
 | `BILI_PERSIST` | `=0` 关闭持久化（ephemeral/test） |
 | `BILI_PERSIST_DEBOUNCE_MS` | persist.debounceMs，500 |
