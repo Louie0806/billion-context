@@ -1534,14 +1534,12 @@ test("HTTP a mid-history rewrite replaces the snapshot wholesale with an exact b
     } finally { await h.close(); }
 });
 
-test("HTTP a cold-restored parent serves its intact raw tail immediately (#5140)", { timeout: 60_000 }, async () => {
-    // #5140: the reconstruction reads the UNIFIED sidecar, so this case is
-    // only meaningful in full mode. It used to inherit "full" from whichever
-    // suite ran before it in the same process; the CI baseline preload pins
-    // BILI_STORAGE_UNIFIED=legacy (#2815) and made the dependency invisible
-    // locally, where the file is driven standalone. Pin it here so the case
-    // states its own precondition.
-    const priorMode = process.env.BILI_STORAGE_UNIFIED;
+test("HTTP a cold-restored non-retained parent serves its intact raw tail immediately (#5140)", { timeout: 60_000 }, async () => {
+    // The reconstruction path reads the unified index, so this test must run
+    // under unified-full — the global test baseline pins BILI_STORAGE_UNIFIED=
+    // "legacy" for non-storage suites, under which the sidecar never opens and
+    // replicasAvailable() is structurally false (a bare sidecar-missing 409).
+    const oldMode = process.env.BILI_STORAGE_UNIFIED;
     process.env.BILI_STORAGE_UNIFIED = "full";
     const h = await harness(true);
     try {
@@ -1562,9 +1560,8 @@ test("HTTP a cold-restored parent serves its intact raw tail immediately (#5140)
         assert.equal((await h.request("/__bili/plugin/snapshot?conversationId=parent")).status, 200);
         assert.equal(resolveConversation("parent").session!.pluginSnapshot!.length, 3);
     } finally {
-        if (priorMode === undefined) delete process.env.BILI_STORAGE_UNIFIED;
-        else process.env.BILI_STORAGE_UNIFIED = priorMode;
         await h.close();
+        if (oldMode === undefined) delete process.env.BILI_STORAGE_UNIFIED; else process.env.BILI_STORAGE_UNIFIED = oldMode;
     }
 });
 
