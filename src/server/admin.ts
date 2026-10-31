@@ -27,7 +27,7 @@ import { PCK_NOTICE_ID, dismissUpgradeNotice, pckNoticeActive } from "../pck-not
 import { listSessions, memoryReport, peekSession, splitSessionWarnings, totalInFlight } from "../session.js";
 import { BILI_TUNNEL_HEADER } from "../tunnel-guard.js";
 import { isLoopbackAddress } from "../util.js";
-import { clearUpstreamAlertsForHost, getUpstreamAlerts } from "../upstream-alerts.js";
+import { clearUpstreamAlertsForHost, getUpstreamAlerts, getUpstreamHealthReport } from "../upstream-alerts.js";
 import { pckAblations } from "../pck-probe.js";
 import { formatUpstreamError, getUpstreamConnectionStatus, proxyDispatcher, recordUpstreamConnection, resetProxyCache, resolveProxyDecision } from "../upstream-proxy.js";
 import { detectStaleInstall, getLastInstall } from "../update.js";
@@ -236,6 +236,20 @@ export async function handleAdminRoute(req: http.IncomingMessage, res: http.Serv
     if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts, typeof req.headers.host === "string" ? req.headers.host : undefined);
     if (req.method === "GET" && req.url === "/__bili/resign") return sendResignStatus(res);
     if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts, typeof req.headers.host === "string" ? req.headers.host : undefined);
+    // #5146: per-host upstream health (alerts + open circuits) for DSH's frame-level
+    // banner — loopback-gated like every other /__bili/* route above. The DSH
+    // renderer polls this CROSS-ORIGIN from its own web port, so echo the
+    // requesting origin as ACAO exactly like the /__bili/ shell and
+    // /__bili/plugin/status do: only origins the trusted-origin gate admitted
+    // reach this line, and the payload is a bounded in-memory snapshot.
+    if (req.method === "GET" && req.url === "/__bili/upstreams") {
+        const reqOrigin = req.headers.origin;
+        const headers: Record<string, string> = { "content-type": "application/json" };
+        if (typeof reqOrigin === "string" && reqOrigin.length > 0) headers["access-control-allow-origin"] = reqOrigin;
+        res.writeHead(200, headers);
+        res.end(JSON.stringify(getUpstreamHealthReport()));
+        return;
+    }
     if (req.method === "GET" && (req.url === "/__bili/sessions" || req.url?.startsWith("/__bili/sessions?"))) return sendWebSessions(res, req);
     if (req.method === "GET" && req.url?.startsWith("/__bili/logs")) return sendWebLogs(res, req);
     if (req.method === "GET" && req.url?.startsWith("/__bili/diagnostics")) return sendDiagnostics(res, req.url);
