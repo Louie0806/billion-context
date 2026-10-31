@@ -265,7 +265,9 @@ function renderForeignPlan(plan: ForeignBlockPlan): string {
 async function runForeignBlocks(store: SessionStore, json: boolean, apply: boolean, restoreTarget?: string): Promise<StorageCommandResult> {
     if (!store.replicasAvailable()) return fail(`sessions foreign-blocks ${UNIFIED_REQUIRED}`, json);
     if (restoreTarget) {
-        const sep = restoreTarget.indexOf(":");
+        // Split on the LAST colon so a session id that itself contains ":" still parses;
+        // block ids are plain (bNN) and never carry a colon.
+        const sep = restoreTarget.lastIndexOf(":");
         if (sep <= 0) return fail("usage: bili sessions foreign-blocks --restore <sessionId>:<blockId>", json);
         const sid = restoreTarget.slice(0, sep);
         const bid = restoreTarget.slice(sep + 1);
