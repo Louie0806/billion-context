@@ -114,6 +114,39 @@ test("#5312 engine: archiveBlock is reversible — content preserved, row restor
     } finally { h.close(); }
 });
 
+test("#5312 engine: restore onto a live twin keeps the twin and does not leak content refs", () => {
+    const h = openStore("twin");
+    try {
+        const sid = "s1";
+        const plan = planIngest(session(sid, ["A", "B", "C"].map(msg), [
+            { blockId: "foreign", effectiveMessageIds: ["f1", "f2"] },
+        ]));
+        h.store.ingestSession(plan);
+        const origHash = h.store.getBlocks(sid).find((b) => b.blockId === "foreign")?.summaryHash;
+        assert.ok(origHash, "summary hash present pre-archive");
+        const rcOf = (hash: string): number => {
+            const db = (h.store as unknown as { db: { prepare(q: string): { get(p: string): { n: number } | undefined } } }).db;
+            return Number(db.prepare("SELECT refcount AS n FROM content WHERE hash = ?").get(hash)?.n ?? 0);
+        };
+        const arcDir = path.join(h.dir, "archive");
+        assert.ok(h.store.archiveBlock(sid, "foreign", { archiveDir: arcDir }).ok, "archive ok");
+        // Re-ingest the identical log → the twin reappears live with byte-identical
+        // summary (same hash), so restore hits the ON CONFLICT path.
+        h.store.ingestSession(plan);
+        assert.ok(h.store.getBlocks(sid).some((b) => b.blockId === "foreign"), "twin block is live");
+        const rcBefore = rcOf(origHash!);
+        assert.ok(rcBefore >= 1, "twin content row alive with a refcount to compare against");
+
+        const res = h.store.restoreBlock(sid, "foreign", { archiveDir: arcDir });
+        assert.ok(res.ok, `restore onto twin ok (${res.reason})`);
+        // Twin stays authoritative AND the conflicted restore must not have
+        // bumped the body's refcount (it would never reach 0 again = leak).
+        assert.equal(rcOf(origHash!), rcBefore, "conflicted restore must not inflate content refcount");
+        // The archive line was still consumed → second restore no-ops.
+        assert.equal(h.store.restoreBlock(sid, "foreign", { archiveDir: arcDir }).reason, "not-found");
+    } finally { h.close(); }
+});
+
 // --- Policy classification via a lightweight stub (no DB; deterministic) ---
 
 interface StubBlock { blockId: string; tier: number; active: boolean; payloadJson: string; }

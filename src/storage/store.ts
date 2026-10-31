@@ -2076,8 +2076,13 @@ export class UnifiedStore {
 
     /** #5312: inverse of archiveBlock — re-put the block's CAS bodies and
      *  re-insert its row from the block archive log, then drop the restored
-     *  line(s). ON CONFLICT DO NOTHING keeps a live twin authoritative (first
-     *  claimant wins), matching restoreArchived. */
+     *  line(s). A live twin, if any, stays authoritative (first claimant wins,
+     *  matching restoreArchived) and the CAS bodies are NOT re-put: doing so
+     *  would inflate each body's refcount by 1 permanently (slow content-table
+     *  leak; #5312 review, non-blocking finding 1). putContent still precedes
+     *  the insert on the conflict-free path because the blocks row carries a
+     *  foreign key onto content; ON CONFLICT DO NOTHING stays as belt-and-
+     *  braces behind the explicit twin probe. */
     restoreBlock(sessionId: string, blockId: string, opts: { archiveDir: string }): { ok: boolean; reason?: string } {
         const exportPath = join(opts.archiveDir, UnifiedStore.BLOCK_ARCHIVE_LOG_NAME);
         if (!existsSync(exportPath)) return { ok: false, reason: "export-missing" };
@@ -2094,6 +2099,14 @@ export class UnifiedStore {
         let dump: { block: Record<string, unknown>; content: Record<string, string> };
         try { dump = JSON.parse(rawLines[lineNo]) as typeof dump; } catch { return { ok: false, reason: "export-corrupt" }; }
         this.db.transaction(() => {
+            // Twin probe FIRST: a pre-existing live block keeps authority and we
+            // must not touch content refcounts (the reviewed leak path). The FK
+            // blocks→content is why the conflict-free path still puts content
+            // before its insert.
+            const twin = this.db.prepare(
+                "SELECT 1 AS one FROM blocks WHERE session_id = ? AND block_id = ?",
+            ).get(sessionId, blockId);
+            if (twin) return;
             for (const [hash, body] of Object.entries(dump.content)) this.putContent(Buffer.from(body, "utf8"), hash);
             this.db.prepare(
                 `INSERT INTO blocks (block_id, session_id, ord, start_seq, end_seq, start_ref, end_ref, tier, summary_hash, one_hash, supersedes_block_id, active, created_at, covered_hash, payload_json)
