@@ -172,6 +172,9 @@ export const WEB_CLIENT = `(function () {
             if (m && m[1] !== undefined) API_ROOT = m[1] + "__bili";
         }
     } catch (e) {}
+    // #5319 (web half): resolved pack names from GET /__bili/packs — filled by
+    // loadConfig(); empty until then and the picker falls back to default+lean.
+    let packNames = [];
     function t(key, vars) {
         let text = MESSAGES[locale][key];
         if (text === undefined) text = MESSAGES["zh-CN"][key];
@@ -3620,6 +3623,11 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
     async function loadConfig() {
         try {
             const cfg = await json(API_ROOT + "/config");
+            // #5319 (web half): refresh the resolved pack inventory so the picker
+            // shows everything on disk (shipped chat pack, user/project files).
+            json(API_ROOT + "/packs").then((p) => {
+                if (p && Array.isArray(p.packs)) packNames = p.packs.map((x) => String(x.name));
+            }).catch(() => {});
             const cfgPathEl = $("cfg-path");
             if (cfgPathEl) cfgPathEl.textContent = cfg.path || t("common.empty");
             const fileBtn = $("copy-cfg-file");
@@ -3826,7 +3834,7 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
             abRow.inp.checked = ab ? ab.enabled === true : false;
             const pv = (cp && typeof cp.promptPack === "string") ? cp.promptPack : "default";
             while (packSel.options.length > 0) packSel.removeChild(packSel.lastChild);
-            ["default", "lean"].forEach((name) => {
+            (packNames.length ? packNames : ["default", "lean"]).forEach((name) => {
                 const o = document.createElement("option");
                 o.value = name;
                 o.textContent = name;
@@ -3985,6 +3993,7 @@ if (d.keepalive) kv(parts, t("det.keepalive"), d.keepalive.tierLabel + " · " + 
         function updatePackNote() {
             if (packSel.value === "lean") packNote.textContent = t("cfg.q_pack_lean_desc");
             else if (packSel.value === "default") packNote.textContent = t("cfg.q_pack_default_desc");
+            else if (packSel.value === "chat") packNote.textContent = t("cfg.q_pack_chat_desc");
             else packNote.textContent = t("cfg.q_pack_custom");
         }
         box.appendChild(packNote);
