@@ -534,3 +534,54 @@ test("#5175 A: a drift-stripped turn is retried instead of reaching the client e
     assert.equal(calls, 1, "a fully drift-stripped turn must be retried, not passed through empty");
     assert.ok(text.includes("the real answer"), `the retry's answer must reach the client, got ${JSON.stringify(text)}`);
 });
+
+// #5175 defect A, the two shapes that survived the FIRST cut.
+//
+// Both are a drifted opening half carrying the emitter's `tokens=` attribute
+// slot whose CLOSING name disagrees with the opening name:
+//   <actp tokens="80">m08844</action>
+//   <tool_call tokens="0" type="text">m10234</acctokens>
+// `DRIFT_PAIR` and `DRIFT_ATTR` both carry a `\1` backreference, so they require
+// the halves to agree; `DRIFT_EMPTY_MISMATCH` only covers an EMPTY body. The
+// compound shape therefore had no owner and rode the fast path verbatim — found
+// by replaying the shipped corpus (57 units across 6 fields, all safe: neither
+// name is HTML or a kernel protocol tag) and then confirmed on the real wire.
+const ATTR_MISMATCH = "Here is the status report.\n\n<actp tokens=\"80\">m08844</action>\n\nThat is all.";
+const TOOLCALL_MISMATCH = "x\n\n<tool_call tokens=\"0\" type=\"text\">m10234</acctokens>\n\ny";
+
+test("#5175 A: an attr+mismatch unit is stripped whole-text", () => {
+    const got = stripAcpTags(ATTR_MISMATCH);
+    assert.equal(got, "Here is the status report.\n\n\n\nThat is all.",
+        `the attr+mismatch unit must not survive, got ${JSON.stringify(got)}`);
+    const pure = stripDriftResidue(TOOLCALL_MISMATCH);
+    assert.equal(pure, "x\n\n\n\ny",
+        `the underscored drifted unit survived whole-text, got ${JSON.stringify(pure)}`);
+});
+
+test("#5175 A: an attr+mismatch unit never survives any chunking on the chat wire", async () => {
+    for (const size of [0, 40, 13, 7, 1]) {
+        const chunks = size === 0 ? [ATTR_MISMATCH] : chunked(ATTR_MISMATCH, size);
+        const text = await driveChat(chunks);
+        assert.equal((text.match(/m\d{4,}/g) ?? []).length, 0,
+            `a kernel ref reached the client at size=${size}: ${JSON.stringify(text)}`);
+        assert.ok(!/<actp/.test(text), `render-tag markup reached the client at size=${size}: ${JSON.stringify(text)}`);
+        assert.ok(text.includes("That is all."), `prose was lost at size=${size}: ${JSON.stringify(text)}`);
+    }
+});
+
+test("#5175 A: a drifted open name containing '_' engages the gate and dies", async () => {
+    for (const size of [0, 40, 13, 7, 1]) {
+        const chunks = size === 0 ? [TOOLCALL_MISMATCH] : chunked(TOOLCALL_MISMATCH, size);
+        const text = await driveChat(chunks);
+        assert.equal((text.match(/m\d{4,}/g) ?? []).length, 0,
+            `a kernel ref reached the client at size=${size}: ${JSON.stringify(text)}`);
+        assert.ok(!/<tool_call/.test(text), `drifted marker reached the client at size=${size}: ${JSON.stringify(text)}`);
+    }
+});
+
+test("#5178 negative: a genuine html opening tag stays prose and is never stripped", () => {
+    const genuine = '<div tokens="3">m00257</span>';
+    assert.equal(stripDriftResidue(genuine), genuine, "a genuine html name must never be read as a drifted render name");
+    assert.equal(mayStartDegenerateRenderTag('<div class="x"'), false,
+        "a genuine opening tag at the tail must stay prose to the accounting pass (#1760)");
+});

@@ -327,6 +327,32 @@ function stripEmptyMismatch(text: string): string {
     return text.replace(new RegExp(DRIFT_EMPTY_MISMATCH.source, "gi"), (whole, open: string, close: string) =>
         (HTML_TAG_NAMES.has(open.toLowerCase()) || PROTOCOL_TAG_NAMES.has(open.toLowerCase())) || (HTML_TAG_NAMES.has(close.toLowerCase()) || PROTOCOL_TAG_NAMES.has(close.toLowerCase())) ? whole : "");
 }
+/** #5175 second shape: the SAME emitter attributes (`tokens=`) with a body of
+ *  bare refs, but the closing name disagrees with the opening one —
+ *  `<actp tokens="80">m08844</action>`. `DRIFT_PAIR` and `DRIFT_ATTR` both carry
+ *  a `\1` backreference, so they require the two halves to agree; the empty-body
+ *  rule below covers only a body with nothing in it. This shape therefore had no
+ *  owner at all and reached the client verbatim (measured on the shipped corpus:
+ *  six fields, 57 units, e.g. `<tool_call tokens="0" text">m10246</acptokens>`
+ *  and `<actp tokens="57" type="text">m08313</actxt>`).
+ *
+ *  Deliberately STRIPS THE SPAN ONLY and does NOT license orphan-half removal:
+ *  an open name here can be a genuine tool-call name (`tool_call`), and proving
+ *  it would let the orphan pass delete real tool-call markup elsewhere in the
+ *  field (#1039 keeps those intact). Removing the matched span is enough to stop
+ *  the leak; the halves left behind are the same documented residual the
+ *  pair rules already tolerate. Both names must be non-canonical, so genuine
+ *  (if malformed) `<div tokens="1">m00257</span>` survives. */
+const DRIFT_ATTR_MISMATCH = new RegExp(
+    "\\x3c(?!" + CANONICAL_TAG_ALT + "\\b)" + DRIFT_NAME_SRC +
+    "\\s[^<>]*\\btokens\\s*=[^<>]*>\\s*(" + REFS_RUN + ")\\s*\\x3c\\/" +
+    "(?!" + CANONICAL_TAG_ALT + "\\b)([A-Za-z][A-Za-z0-9_]{0,31})\\s*>",
+    "gi",
+);
+function stripAttrMismatch(text: string): string {
+    if (!text.includes("\x3c/")) return text;
+    return text.replace(new RegExp(DRIFT_ATTR_MISMATCH.source, "gi"), () => "");
+}
 
 // #5175 streaming: a drifted opening at the buffer tail must not be released as
 // prose. The machine's own tail chain is enumeration-scoped (NAME feeds
@@ -741,7 +767,7 @@ function stripPass(text: string, dropToolCallEmission: boolean, requestText: str
     // already claimed everything it recognises; what reaches here is exactly the
     // drift this pass exists for. `attested || out !== text` mirrors
     // DEAD_REF_CLOSE's gate (#1760).
-    out = stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(out, attested || out !== text)));
+    out = stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(out, attested || out !== text))));
     return stripBiliArtifacts(out);
 }
 
@@ -763,7 +789,7 @@ const STRIP_PASS_CAP = 8;
  *  land in different pushes is left alone rather than guessed at — matching
  *  #1720's documented behaviour, never widening it. */
 export function stripDriftResidue(text: string): string {
-    return stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(text, false)));
+    return stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(text, false))));
 }
 /** Whole-text ACP artifact strip. Returns a FIXED POINT whenever the exposure
  *  cascade settles within STRIP_PASS_CAP passes (all attested shapes and every
@@ -874,12 +900,32 @@ export function mayStartRenderTag(s: string): boolean {
 // mayStartRenderTag: isOrphanMarkupText (#1760) consumes those for
 // degenerate-turn accounting, where a prose tail such as "a<b" must stay
 // prose, not residue.
-const BROAD_TAG_HEAD_TAIL = new RegExp("\x3c\\/?[A-Za-z0-9]{0,16}$");
+// #5175: the #2190 head probe had two gaps, both found by tracing the real wire.
+//  (1) It has no `_`, so a drifted OPEN name carrying one (`<tool_call`) never
+//      engages the machine — yet the corpus shows `tool_call` is exactly what
+//      the emitter imitates. Widen the name class only (still tail-anchored, so
+//      it stays a *head* probe; a complete tag is caught by the shape test below).
+//  (2) It stopped at the name, so once the name has arrived and only the ATTRIBUTE
+//      SLOT is still growing (`<actp tokens="8`, `<tool_call tokens="0" type="te`)
+//      the gate says "not a tag" and the fast path releases the fragment. The slot
+//      is then split away from a later chunk carrying the ref and the close, and
+//      the pair never resolves in one buffer — the residual seen on the real wire.
+//      An unterminated `<name + whitespace + attribute-ish prefix` at the chunk
+//      TAIL is unambiguous tag structure: no prose ends a sentence that way.
+const BROAD_TAG_OPEN_TAIL = new RegExp(
+    "\x3c\\/?(?:" +
+        "[A-Za-z0-9_]{0,16}" +
+        "|" +
+        "(?!" + CANONICAL_TAG_ALT + "\\b)[A-Za-z][A-Za-z0-9_]{0,31}\\s[^<>]{0,120}" +
+        "|" +
+        "(?!" + CANONICAL_TAG_ALT + "\\b)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]{0,31}" +
+        ")$",
+);
 export function mayStartDegenerateRenderTag(s: string): boolean {
-    if (BROAD_TAG_HEAD_TAIL.test(s)) return true;
+    if (BROAD_TAG_OPEN_TAIL.test(s)) return true;
     // #5175: a COMPLETE drifted unit anywhere in the chunk, not only a head at
     // its tail. The head-only probe was the entire gap behind the report: the
-    // paragraph ends with a CLOSED `</apct>`, so BROAD_TAG_HEAD_TAIL never
+    // paragraph ends with a CLOSED `</apct>`, so the head-only probe never
     // matched, the fast path released the bytes verbatim, and the stripper was
     // never consulted — the imitation reached the client without a single
     // filter call. `containsRenderTagText` is the same shape test the
@@ -1538,7 +1584,8 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
             DRIFT_PAIR.lastIndex = 0;
             DRIFT_ATTR.lastIndex = 0;
             DRIFT_EMPTY.lastIndex = 0;
-            const dp = DRIFT_PAIR.exec(buf) ?? DRIFT_ATTR.exec(buf) ?? DRIFT_EMPTY.exec(buf);
+            DRIFT_ATTR_MISMATCH.lastIndex = 0;
+            const dp = DRIFT_PAIR.exec(buf) ?? DRIFT_ATTR.exec(buf) ?? DRIFT_EMPTY.exec(buf) ?? DRIFT_ATTR_MISMATCH.exec(buf);
             // Orphan unit (#2023): only reached when no opening is live — a
             // close inside a swallow belongs to that pair's content (#1720).
             // The lookbehind class extends across the chunk boundary: a run at
@@ -1602,7 +1649,7 @@ export function createTagEchoFilter(onDrop?: (snippet: string) => void, onResidu
                 // gated off every canonical name, so it can only match a drifted opening
                 // that no other matcher above understands. Without it PARTIAL_TAIL's
                 // trailing partial-ref arm claims the `m` and releases `<acpt ` as prose.
-                const t = DRIFT_TAIL.exec(buf) ?? PARTIAL_TAIL.exec(buf) ?? BROAD_TAG_HEAD_TAIL.exec(buf);
+                const t = DRIFT_TAIL.exec(buf) ?? PARTIAL_TAIL.exec(buf) ?? BROAD_TAG_OPEN_TAIL.exec(buf);
                 if (t) {
                     // A definite \x3c<name> opening is never prose — hold it far
                     // past HOLD_LIMIT (drop it past TAG_OPEN_CAP); a short
