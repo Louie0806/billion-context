@@ -354,6 +354,37 @@ function stripAttrMismatch(text: string): string {
     return text.replace(new RegExp(DRIFT_ATTR_MISMATCH.source, "gi"), () => "");
 }
 
+/** #5175 third shape: the emitter wrote the REF where a render tag keeps its
+ *  ATTRIBUTES, and closed under a different guessed name — `<acpt m17138></apct>`.
+ *  The reported paragraph is built out of exactly this unit (three times).
+ *
+ *  Why every earlier rule missed it: `DRIFT_PAIR`/`DRIFT_ATTR` match a bare-ref
+ *  or `tokens=` attribute, but both carry a `\1` backreference, so the opening
+ *  and closing names must AGREE. `DRIFT_EMPTY_MISMATCH` allows them to disagree
+ *  but only for an EMPTY attribute slot. `DRIFT_ATTR_MISMATCH` allows
+ *  disagreement and a ref body but demands `tokens=`. So "bare-ref attribute +
+ *  disagreeing close" — the reported unit — had no owner and reached the client
+ *  verbatim.
+ *
+ *  The discriminating evidence is the ATTRIBUTE SLOT ITSELF: a real tag's
+ *  attribute slot holds `name=value`, never a kernel ref. Requiring a bare ref
+ *  there (rather than merely allowing a mismatch) is what keeps this narrow —
+ *  genuine prose with mismatched halves survives, as does every
+ *  canonical-protocol tag.
+ *
+ *  Same restraint as the sibling rule: strips the matched span only and does not
+ *  license orphan-half removal (#1039 keeps real tool-call markup). */
+const DRIFT_BARE_MISMATCH = new RegExp(
+    "\\x3c(?!" + CANONICAL_TAG_ALT + "\\b)" + DRIFT_NAME_SRC +
+    "\\s+(" + REFS_RUN + ")\\s*>\\s*\\x3c\\/" +
+    "(?!" + CANONICAL_TAG_ALT + "\\b)([A-Za-z][A-Za-z0-9_]{0,31})\\s*>",
+    "gi",
+);
+function stripBareMismatch(text: string): string {
+    if (!text.includes("\x3c/")) return text;
+    return text.replace(new RegExp(DRIFT_BARE_MISMATCH.source, "gi"), () => "");
+}
+
 // #5175 streaming: a drifted opening at the buffer tail must not be released as
 // prose. The machine's own tail chain is enumeration-scoped (NAME feeds
 // PARTIAL_TAIL), so a drifted head either rides out verbatim or — worse — gets
@@ -767,7 +798,7 @@ function stripPass(text: string, dropToolCallEmission: boolean, requestText: str
     // already claimed everything it recognises; what reaches here is exactly the
     // drift this pass exists for. `attested || out !== text` mirrors
     // DEAD_REF_CLOSE's gate (#1760).
-    out = stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(out, attested || out !== text))));
+    out = stripBareMismatch(stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(out, attested || out !== text)))));
     return stripBiliArtifacts(out);
 }
 
@@ -789,7 +820,7 @@ const STRIP_PASS_CAP = 8;
  *  land in different pushes is left alone rather than guessed at — matching
  *  #1720's documented behaviour, never widening it. */
 export function stripDriftResidue(text: string): string {
-    return stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(text, false))));
+    return stripBareMismatch(stripAttrMismatch(stripEmptyMismatch(stripEmptyPairs(stripDriftPairs(text, false)))));
 }
 /** Whole-text ACP artifact strip. Returns a FIXED POINT whenever the exposure
  *  cascade settles within STRIP_PASS_CAP passes (all attested shapes and every

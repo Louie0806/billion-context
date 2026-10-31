@@ -4508,6 +4508,13 @@ export async function pipePluginResponsesWithStrip(
                         // which is how defect A survived on the responses wire.
                         // The signed-reasoning channel never reaches this branch
                         // (it is handled above, byte-verbatim, #1960).
+                        // Evidence must also be taken from the RAW delta: once a
+                        // drift rule runs inside the filter tail chain too, the unit
+                        // is consumed BEFORE release, so `releasedDelta` is already
+                        // empty and a released-only comparison sees no change. That
+                        // is the #732/#821 silent empty-message failure — the turn
+                        // reaches the client with nothing in it and no retry armed.
+                        if (stripDriftResidue(delta) !== delta) sawStrippedEcho = true;
                         const clean = stripDriftResidue(releasedDelta);
                         if (clean !== releasedDelta) sawStrippedEcho = true;
                         lastDeltaMeta = { item_id: ev["item_id"], output_index: ev["output_index"] };

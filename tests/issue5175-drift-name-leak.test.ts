@@ -585,3 +585,45 @@ test("#5178 negative: a genuine html opening tag stays prose and is never stripp
     assert.equal(mayStartDegenerateRenderTag('<div class="x"'), false,
         "a genuine opening tag at the tail must stay prose to the accounting pass (#1760)");
 });
+
+// #5175 third shape: the emitter put the REF where a render tag keeps its
+// ATTRIBUTES, and closed under a different guessed name — `<acpt m17138></apct>`.
+// The reported paragraph is made of exactly this unit. Every earlier drift rule
+// missed it: DRIFT_PAIR/DRIFT_ATTR carry a `\1` backreference (halves must
+// agree), DRIFT_EMPTY_MISMATCH allows disagreement but only for an EMPTY
+// attribute slot, and DRIFT_ATTR_MISMATCH allows disagreement plus a ref body
+// but demands `tokens=`. So "bare-ref attribute + disagreeing close" had no
+// owner and reached the client verbatim.
+const BARE_MISMATCH = "Here is the status report.\n\n<acpt m17138></apct>\n\nThat is all.";
+
+test("#5175 A: a bare-ref attribute with a disagreeing close is stripped whole-text", () => {
+    const got = stripAcpTags(BARE_MISMATCH);
+    assert.equal(got, "Here is the status report.\n\n\n\nThat is all.",
+        `the bare-ref+mismatch unit must not survive, got ${JSON.stringify(got)}`);
+    // The same unit reached through the other entry point (responses wire retry).
+    assert.equal(stripDriftResidue(BARE_MISMATCH), "Here is the status report.\n\n\n\nThat is all.",
+        "stripDriftResidue must own the bare-ref+mismatch unit too");
+});
+
+test("#5175 A: a bare-ref attribute with a disagreeing close never survives any chunking", async () => {
+    for (const size of [0, 40, 13, 7, 1]) {
+        const chunks = size === 0 ? [BARE_MISMATCH] : chunked(BARE_MISMATCH, size);
+        const text = await driveChat(chunks);
+        assert.equal((text.match(/m\d{4,}/g) ?? []).length, 0,
+            `a kernel ref reached the client at size=${size}: ${JSON.stringify(text)}`);
+        assert.ok(!/<acpt/.test(text), `render-tag markup reached the client at size=${size}: ${JSON.stringify(text)}`);
+        assert.ok(text.includes("That is all."), `prose was lost at size=${size}: ${JSON.stringify(text)}`);
+    }
+});
+
+test("#5178 negative: a genuine mismatched html pair stays prose", () => {
+    // Both names are canonical HTML, so this is malformed author markup, not an
+    // emitter guessing its own name — it must survive untouched.
+    const genuine = '<div class="x">m00257</span>';
+    assert.equal(stripDriftResidue(genuine), genuine,
+        "a canonical-html mismatched pair must never be read as a drifted render unit");
+    // And a real attribute slot (name=value) is NOT a bare ref: same restraint.
+    const attrs = '<acpt class="x">m00257</apct>';
+    assert.equal(stripDriftResidue(attrs), attrs,
+        "a real name=value attribute slot must not license the bare-ref rule");
+});
