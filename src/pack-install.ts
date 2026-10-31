@@ -99,6 +99,21 @@ function findInstalledPkg(prefix: string): { dir: string; manifest: Record<strin
     return best ? { dir: best.dir, manifest: best.manifest } : undefined;
 }
 
+/**
+ * #5340 follow-up (windows shard): without a shell there is no PATH shim
+ * resolution — plain `npm` ENOENTs, and spawning the `.cmd` shim directly
+ * still hit silent instant failures on GH windows runners (7 ms, empty
+ * stderr). The npm-cli.js next to the running node binary sidesteps shims,
+ * PATH and cmd wrapping entirely, and keeps spec args out of any shell.
+ */
+function resolveNpmExec(): { file: string; argsPrefix: string[] } {
+    if (process.platform === "win32") {
+        const cliJs = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+        if (existsSync(cliJs)) return { file: process.execPath, argsPrefix: [cliJs] };
+    }
+    return { file: process.platform === "win32" ? "npm.cmd" : "npm", argsPrefix: [] };
+}
+
 export function installPackFromNpm(spec: string, options: PackInstallOptions = {}): InstalledPack {
     const trimmed = spec.trim();
     if (!trimmed) throw new Error("spec is required (an npm package name, name@version, git URL, or .tgz path)");
@@ -108,10 +123,9 @@ export function installPackFromNpm(spec: string, options: PackInstallOptions = {
     try {
         let stderr = "";
         try {
-            // #5340 follow-up: on Windows the npm shim is npm.cmd (no shell here),
-            // so ENOENT meant "not found" even when node/npm were installed.
-            const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-            execFileSync(npmCmd, [
+            const npmExec = resolveNpmExec();
+            execFileSync(npmExec.file, [
+                ...npmExec.argsPrefix,
                 "install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed,
             ], { timeout: NPM_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
         } catch (error) {
