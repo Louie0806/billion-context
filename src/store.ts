@@ -19,7 +19,7 @@ import { stateDir } from "./paths.js";
 import { getStore } from "./persist.js";
 import type { CompressSettings } from "./config.js";
 import { ccrRetrievalTtlMs as knobCcrRetrievalTtlMs } from "./knobs.js";
-import { isDroppedContentStore, type PendingRetrieval, type Session } from "./session.js";
+import type { PendingRetrieval, Session } from "./session.js";
 import { toolFail, toolOk, type ProxyToolResult } from "./proxy-tool-result.js";
 
 export type CcrSettings = NonNullable<CompressSettings["ccr"]>;
@@ -134,17 +134,24 @@ export function contentStoreOf(session: Session): MessageContentStore {
  *  only when new entries appeared, so a no-growth turn costs nothing. */
 export function adoptContentStore(session: Session, store: MessageContentStore): void {
     const prev = session.contentStore;
-    // #4788 phase 2: a discharged (lazy) resident store is a Proxy that throws
-    // on first touch when its on-disk copy vanished under it (e.g. the sidecar
-    // was replaced by a directory, or the user deleted the sessions dir after
-    // the drop). Adoption is append-only and the incoming store already carries
-    // every ref (kernel processTurn re-ingests the history), so a THINNED prev
-    // is not a source of truth: treat it as absent instead of letting one stale
-    // path turn a normal turn into a hard failure.
-    const usablePrev = prev && !isDroppedContentStore(prev) ? prev : undefined;
-    const added = usablePrev
-        ? Object.entries(store.byRef).filter(([ref]) => !(ref in usablePrev.byRef))
-        : Object.entries(store.byRef);
+    // #4788 phase-2 dropped prev can be a lazy re-materialize proxy whose disk
+    // proof vanished after the drop (envelope lost/corrupted). Touching it
+    // throws by design (#2674 payload-first discipline) — but nothing READABLE
+    // lived in that proxy (its loader already failed), so an unrecoverable
+    // prev degrades to "no prior refs" instead of aborting the turn: the
+    // incoming store stays authoritative and the session survives to its next
+    // save instead of hard-erroring on every subsequent touch.
+    let prevRefs: Set<string> | null = null;
+    if (prev) {
+        try {
+            prevRefs = new Set(Object.keys(prev.byRef));
+        } catch (err) {
+            loggerLog("warn", `[ccr] lazy content store for ${session.id} could not be re-materialized during adopt (${String(err instanceof Error ? err.message : err)}) — proceeding with the incoming store as the full set`);
+        }
+    }
+    const added = !prev || prevRefs === null
+        ? Object.entries(store.byRef)
+        : Object.entries(store.byRef).filter(([ref]) => !prevRefs!.has(ref));
     session.contentStore = store;
     if (added.length === 0) return;
     let saved = 0;

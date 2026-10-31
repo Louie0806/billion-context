@@ -17,14 +17,14 @@
 // overwrite of user config). Writes go through the temp-file+rename
 // pattern shared with every other writer here.
 
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { safePrefix } from "./text-safe.js";
 import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isValidPackName, sanitizePackSurface, type PromptPackFile } from "acp-kernel";
 import { configDir } from "./paths.js";
-import { planDshSpawn } from "./dsh-channel.js";
 import { packSurfaceHasContent } from "./web/api.js";
 
 /** The file an npm package must ship to be installable as a pack. */
@@ -99,6 +99,21 @@ function findInstalledPkg(prefix: string): { dir: string; manifest: Record<strin
     return best ? { dir: best.dir, manifest: best.manifest } : undefined;
 }
 
+/**
+ * #5340 follow-up (windows shard): without a shell there is no PATH shim
+ * resolution — plain `npm` ENOENTs, and spawning the `.cmd` shim directly
+ * still hit silent instant failures on GH windows runners (7 ms, empty
+ * stderr). The npm-cli.js next to the running node binary sidesteps shims,
+ * PATH and cmd wrapping entirely, and keeps spec args out of any shell.
+ */
+function resolveNpmExec(): { file: string; argsPrefix: string[] } {
+    if (process.platform === "win32") {
+        const cliJs = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+        if (existsSync(cliJs)) return { file: process.execPath, argsPrefix: [cliJs] };
+    }
+    return { file: process.platform === "win32" ? "npm.cmd" : "npm", argsPrefix: [] };
+}
+
 export function installPackFromNpm(spec: string, options: PackInstallOptions = {}): InstalledPack {
     const trimmed = spec.trim();
     if (!trimmed) throw new Error("spec is required (an npm package name, name@version, git URL, or .tgz path)");
@@ -108,30 +123,19 @@ export function installPackFromNpm(spec: string, options: PackInstallOptions = {
     try {
         let stderr = "";
         try {
-            // #5340: `npm` is `npm.cmd` on Windows, which CreateProcess cannot
-            // execute directly — a bare execFileSync("npm", …) fails there with
-            // ENOENT ("npm was not found on PATH"). planDshSpawn applies the same
-            // cmd.exe /d /s /c wrap the launcher/pi/dsh lanes already use.
-            const npmArgs = ["install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed];
-            const plan = planDshSpawn("npm", npmArgs);
-            const res = spawnSync(plan.command, plan.args, {
-                timeout: NPM_TIMEOUT_MS,
-                stdio: ["ignore", "pipe", "pipe"],
-                windowsVerbatimArguments: plan.windowsVerbatimArguments,
-                windowsHide: true,
-            });
-            if (res.error) throw res.error;
-            if (res.status !== 0 && res.status !== null) {
-                const err = new Error(`exit ${res.status}`);
-                Object.assign(err, { status: res.status, stderr: typeof res.stderr === "string" ? res.stderr : "" });
-                throw err;
-            }
-            stderr = typeof res.stderr === "string" ? res.stderr : "";
+            const npmExec = resolveNpmExec();
+            execFileSync(npmExec.file, [
+                ...npmExec.argsPrefix,
+                "install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed,
+            ], { timeout: NPM_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
         } catch (error) {
             const err = error as { stderr?: unknown; message?: string };
             stderr = typeof err.stderr === "string" ? err.stderr : "";
             if (/ENOENT/.test(String(err.message))) throw new Error("npm was not found on PATH");
-            const tail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300);
+            const tailLines = stderr.trim().split("\n");
+            // text-safe family gate: no raw negative slice literals; head-keep,
+            // surrogate-safe via safePrefix (#816/#1615 discipline).
+            const tail = safePrefix((tailLines.length > 3 ? tailLines.slice(tailLines.length - 3) : tailLines).join(" "), 300);
             throw new Error(`npm install ${trimmed} failed${tail ? `: ${tail}` : ""}`);
         }
 

@@ -102,10 +102,12 @@ test("#5103: explicit attachUrl target found but build-incompatible — refusal 
     const notice = stderrLines.find((l) => l.includes(`explicit attach target ${ORIGIN}`));
     assert.ok(notice, "the visible channel must name the refused explicit target");
     assert.ok(notice!.includes("code-fingerprint-mismatch"), notice);
-    // #4125 rewrote this remedy: a strictly newer same-lane holder is now adopted
-    // rather than deadlocked around, so the wording no longer promises "the same
-    // version" — pin the stable remedy fragment instead of the old sentence.
-    assert.ok(notice!.includes("restart the host once its copy converges"), notice);
+    // #4125 follow-up: newer same-lane targets attach automatically, so the
+    // remedy now spells out that reaching this message means the target
+    // reports the SAME or an OLDER build — aligning the installs (or stopping
+    // the target) is the way out.
+    assert.ok(notice!.includes("A target that reports a STRICTLY NEWER build attaches automatically"), notice);
+    assert.ok(notice!.includes("align the two installs"), notice);
     assert.ok(diags.some((d) => d.includes(`explicit attach target ${ORIGIN}`)), "the durable log gets the same line");
 });
 
