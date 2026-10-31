@@ -48,20 +48,6 @@ function collectRefs(): Set<string> {
     for (const m of clientSrc.matchAll(/\bt\("([\w.]+)"/g)) refs.add(m[1]);
     for (const m of reportSrc.matchAll(/\bt\("([\w.]+)"/g)) refs.add(m[1]);
     for (const m of reportSrc.matchAll(/\btr\(\s*\w+,\s*"([\w.]+)"/g)) refs.add(m[1]);
-    // #5345: the scans above only see LITERAL `t("key")` / `data-i18n="key"`
-    // uses. Two live call forms are invisible to them:
-    //   - a `[value, key]` pair table — the pack-base <option>s are built from
-    //     `[["", "cfg.q_pack_base_blank"], …].forEach(p => t(p[1]))`;
-    //   - a helper that takes the key as an argument —
-    //     `packSectionField("cfg.q_pack_phil", "cfg.q_phil_help", 5)`.
-    // Both left the dead-key assertion below firing on keys that are very much
-    // alive (the #5345 guided pack editor added them). `cfg.` is this catalog's
-    // namespace, so any `cfg.*` literal in the web sources is a genuine
-    // reference; collect those instead of enumerating call shapes, which is how
-    // this gate fell behind in the first place.
-    for (const m of clientSrc.matchAll(/"(cfg\.[\w.]+)"/g)) refs.add(m[1]);
-    for (const m of pageSrc.matchAll(/"(cfg\.[\w.]+)"/g)) refs.add(m[1]);
-    for (const m of reportSrc.matchAll(/"(cfg\.[\w.]+)"/g)) refs.add(m[1]);
     return refs;
 }
 
