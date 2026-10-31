@@ -32,7 +32,7 @@ const WEDGE_MIN_HOSTS = 2;
 const WEDGE_SUSTAIN_MS = 5 * 60_000;
 const LOG_DEDUP_MS = 10 * 60_000;
 
-export type ResolverWedgeWire = {
+type ResolverWedgeWire = {
     tripped: true;
     /** Wall-clock ms when the earliest qualifying failure streak started. */
     sinceMs: number;
