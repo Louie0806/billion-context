@@ -33,7 +33,7 @@ import { formatUpstreamError, getUpstreamConnectionStatus, proxyDispatcher, reco
 import { detectStaleInstall, getLastInstall } from "../update.js";
 import { getPlannedUpgrade, getUpdatePolicyState } from "../update-policy.js";
 import { PACKAGE_NAME, VERSION, BUILD_COMMIT } from "../version.js";
-import { buildBlockContent, buildMessageContent, buildOverview, buildSessionDetail, buildSessionList, buildSessionPage, buildSessionTree, handleConfigGet, handleConfigPut, handlePricingGet, handleUserPackDelete, handleUserPackGet, handleUserPackPut, hiddenEmptyCount, renderUI, type BlockContentView } from "../web/index.js";
+import { buildBlockContent, buildMessageContent, buildOverview, buildSessionDetail, buildSessionList, buildSessionPage, buildSessionTree, handleConfigGet, handleConfigPut, handlePackTemplatesGet, handlePricingGet, handleUserPackDelete, handleUserPackGet, handleUserPackPut, hiddenEmptyCount, renderUI, type BlockContentView } from "../web/index.js";
 import { handleChangelogGet } from "../web/changelog.js";
 import { kickBlogRefresh } from "../web/blog-refresh.js";
 import { handleBlogAssetGet, handleBlogGet } from "../web/blogfeed.js";
@@ -348,6 +348,9 @@ export async function handleAdminRoute(req: http.IncomingMessage, res: http.Serv
         res.end(JSON.stringify({ packs, userDir: path.join(configDir(), "packs") }));
         return;
     }
+    // #5344: base texts for the guided pack-editor form (tri-state resolved
+    // exactly like buildCompressSystemPrompt). Read-only; same gates.
+    if (req.method === "GET" && req.url === "/__bili/packs/templates") return handlePackTemplatesGet(res);
     // #5328: user-dir pack management — GET/PUT/DELETE <configDir>/packs/
     // <name>.json. The route regex shapes the name to the pack-name charset
     // ([A-Za-z0-9][A-Za-z0-9._-]*) before dispatch; the handlers re-validate
