@@ -6,7 +6,7 @@ import { APIG_RESIGN_SCHEME, KNOWN_SIGNATURE_SCHEMES, readPendingRefusals, unres
 import { handleAcpCache, readKeySwitchStats, readModelSwitchStats, readProjSwitchStats, readPromptSwitchStats } from "../cache-ledger.js";
 import type { ProxyOptions } from "../config.js";
 import { effectivePromptCacheRouting, loadNamedProviders, loadOptions, loadRoutes, resolveResignSettings } from "../config.js";
-import { applyCompressSettings, resolveCompressSurfaceDetailed } from "../compress-settings.js";
+import { applyCompressSettings, listResolvedPacks, resolveCompressSurfaceDetailed } from "../compress-settings.js";
 import { clearConflictEvents, summarizeConflicts } from "../conflict-watch.js";
 import { cannotResolveTarget, getAdvisoryState } from "../advisory.js";
 import { detectCostAdvisories } from "../plugin-advisory.js";
@@ -335,6 +335,16 @@ export async function handleAdminRoute(req: http.IncomingMessage, res: http.Serv
     // #4899: pricing editor data — resolved per-model prices (user overrides >
     // models.dev snapshot) for the panel's billing settings card. Read-only.
     if (req.method === "GET" && req.url === "/__bili/pricing") return handlePricingGet(res);
+    // #5319 (web half): resolved prompt-pack inventory for the panel picker —
+    // the project > user > shipped > builtin chain, first-wins per name.
+    // Read-only; every /__bili/ URL already passed the loopback/origin gates.
+    if (req.method === "GET" && req.url === "/__bili/packs") {
+        const packs = listResolvedPacks()
+            .map((p) => ({ name: p.name, version: p.version ?? null, description: p.description ?? null, source: p.source }));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ packs }));
+        return;
+    }
     // #3719: per-release notes for the panel's changelog section — same
     // read-only admin gating as every other /__bili/ GET above (the gates run
     // before dispatch). Always answers 200; offline degrades to empty+error.
