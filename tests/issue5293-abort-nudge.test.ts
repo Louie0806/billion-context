@@ -1,5 +1,5 @@
 /**
- * #5293 (mirror #5298): pressing Esc mid-stream in pi persists the partial assistant
+ * #5293: pressing Esc mid-stream in pi persists the partial assistant
  * message (pi's agent-loop appends the interrupted message to the transcript) and the
  * continuation turn resends it — but the interrupted turn never reports usage for that
  * output. The next usage-grade reading jumps by exactly the unreported partial, and the
@@ -89,7 +89,7 @@ const msgChars = (m: { content: unknown }): number => {
     return 0;
 };
 
-test("#5298 unit: noteAbortedTurn / absorbAbortedTurnGrowth edge cases", async () => {
+test("#5293 unit: noteAbortedTurn / absorbAbortedTurnGrowth edge cases", async () => {
     const { createSession, noteAbortedTurn, absorbAbortedTurnGrowth, ABORT_REANCHOR_MAX_AGE_MS } = await import("../src/session.ts");
 
     const s0 = createSession("u-skip");
@@ -295,7 +295,7 @@ test("#5293: esc-interrupted output is absorbed, not nudged, on the resume turn"
         assert.equal(bodies.length, 7, "seven requests reached the upstream");
         const hasNudge = (i: number) => bodies[i]!.includes("efficiency nudge");
         for (const i of [0, 1, 2, 3]) assert.ok(!hasNudge(i), `request ${i + 1}: unexpected nudge`);
-        assert.ok(!hasNudge(4), "debt turn must NOT nudge — the aborted output was absorbed into the reference (#5298)");
+        assert.ok(!hasNudge(4), "debt turn must NOT nudge — the aborted output was absorbed into the reference (#5293)");
         assert.ok(!hasNudge(5), "one organic interval below the flat step — no nudge yet");
         assert.ok(hasNudge(6), "a full fresh interval of organic growth must still nudge (negative direction)");
         assert.equal(absorbCount(), 1, "absorb fires exactly once, on the debt turn");

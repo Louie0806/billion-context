@@ -259,7 +259,7 @@ export type Session = {
         /** #4805: the in-flight request's probe verdict ({member, needle}),
          *  recorded at prepare and consumed by settleUsageReport. */
         requestMembership?: { member: boolean; needle: string | null };
-        /** #5298: the user aborted (Esc'd) the model stream mid-turn. The
+        /** #5293: the user aborted (Esc'd) the model stream mid-turn. The
          *  interrupted turn's partial output never reports usage, so the next
          *  usage-grade reading jumps by exactly that unreported mass — counted
          *  as organic growth, the cadence nudge fires on the user's redirect
@@ -912,7 +912,7 @@ export function diagnoseSuccessWithoutUsage(session: Session, wire: string): voi
     loggerLog("warn", `[${session.id}] [${wire}] upstream success without usage report — keeping lastInputTokens=${session.stats.lastInputTokens} (source=${session.stats.lastInputTokensSource ?? "none"}); nudge decisions ride local estimates until a usage-grade sample lands (#1595)`);
 }
 
-/** #5298: growth debt from a user-interrupted turn. When the user aborts a
+/** #5293: growth debt from a user-interrupted turn. When the user aborts a
  *  model stream mid-turn (pi's Esc), the host persists the partial assistant
  *  message and resends it on the next turn, but the interrupted turn never
  *  reports usage for that output — the next usage-grade reading jumps by
@@ -967,7 +967,7 @@ export function absorbAbortedTurnGrowth(session: Session, tokenCount: number): v
     nudge.lastNudgeShownTokens = 0;
     nudge.lastShownByTier = {};
     delete t.abortReanchor;
-    loggerLog("info", `[${session.id}] aborted-turn growth absorbed: nudge reference ${oldRef}→${nudge.lastPerMessageNudgeTokens} (meter ${tokenCount}, pre-abort anchor ${flag.anchor}) (#5298)`);
+    loggerLog("info", `[${session.id}] aborted-turn growth absorbed: nudge reference ${oldRef}→${nudge.lastPerMessageNudgeTokens} (meter ${tokenCount}, pre-abort anchor ${flag.anchor}) (#5293)`);
 }
 
 // #1820: post-rebuild meter anchor. Right after a big preflight rebuild the

@@ -3541,7 +3541,7 @@ export async function pipePluginChatWithStrip(
         settleWitnesses();
         if (res.destroyed || res.writableEnded) {
             log?.("client aborted mid-stream");
-            // #5298: the partial output of an aborted turn never reports usage — record the pre-abort anchor so the first nudge decision after resume can absorb that debt.
+            // #5293: the partial output of an aborted turn never reports usage — record the pre-abort anchor so the first nudge decision after resume can absorb that debt.
             if (session) noteAbortedTurn(session);
             return;
         }
@@ -4406,7 +4406,7 @@ export async function pipePluginResponsesWithStrip(
         settleWitnesses();
         if (res.destroyed || res.writableEnded) {
             log?.("client aborted mid-stream");
-            // #5298: same as the chat lane — record the pre-abort anchor for the post-resume re-anchor.
+            // #5293: same as the chat lane — record the pre-abort anchor for the post-resume re-anchor.
             if (session) noteAbortedTurn(session);
             return;
         }

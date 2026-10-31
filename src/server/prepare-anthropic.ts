@@ -357,7 +357,7 @@ export async function prepareAnthropic(
         // resent history; yield before it so UI/API requests that queued during
         // this turn are served, not frozen behind the whole turn.
         await yieldToEventLoop();
-        // #5298: re-anchor the nudge growth reference after a user-aborted turn (no-op otherwise).
+        // #5293: re-anchor the nudge growth reference after a user-aborted turn (no-op otherwise).
         absorbAbortedTurnGrowth(session, tokenCount);
         const turn = core.processTurn({ messages: renderMsgs, state: session.state, config: loopConfig, tokenCount, renderTags: renderStrategy, contentStore: contentStoreOf(session) });
         session.state = turn.state;
