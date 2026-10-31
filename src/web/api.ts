@@ -177,7 +177,7 @@ export async function handleUserPackDelete(res: ServerResponse, name: string): P
 // tri-state resolution buildCompressSystemPrompt performs: absent key ->
 // kernel default text; null -> removed (empty); string -> verbatim.
 const PACK_TEMPLATE_NAMES = ["default", "chat", "lean"] as const;
-export type PackTemplate = { description?: string; philosophy: string; howToCompress: string };
+type PackTemplate = { description?: string; philosophy: string; howToCompress: string };
 
 function packTemplateFor(name: string): PackTemplate {
     const resolution = resolveCompressSurfaceDetailed({ promptPack: name });
