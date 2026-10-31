@@ -18,6 +18,7 @@
 // pattern shared with every other writer here.
 
 import { execFileSync } from "node:child_process";
+import { safePrefix } from "./text-safe.js";
 import { closeSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -107,14 +108,20 @@ export function installPackFromNpm(spec: string, options: PackInstallOptions = {
     try {
         let stderr = "";
         try {
-            execFileSync("npm", [
+            // #5340 follow-up: on Windows the npm shim is npm.cmd (no shell here),
+            // so ENOENT meant "not found" even when node/npm were installed.
+            const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+            execFileSync(npmCmd, [
                 "install", "--prefix", tmp, "--no-save", "--no-audit", "--no-fund", trimmed,
             ], { timeout: NPM_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
         } catch (error) {
             const err = error as { stderr?: unknown; message?: string };
             stderr = typeof err.stderr === "string" ? err.stderr : "";
             if (/ENOENT/.test(String(err.message))) throw new Error("npm was not found on PATH");
-            const tail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300);
+            const tailLines = stderr.trim().split("\n");
+            // text-safe family gate: no raw negative slice literals; head-keep,
+            // surrogate-safe via safePrefix (#816/#1615 discipline).
+            const tail = safePrefix((tailLines.length > 3 ? tailLines.slice(tailLines.length - 3) : tailLines).join(" "), 300);
             throw new Error(`npm install ${trimmed} failed${tail ? `: ${tail}` : ""}`);
         }
 
