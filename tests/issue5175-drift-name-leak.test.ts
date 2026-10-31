@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
     composeStreamFilters,
     createBiliArtifactFilter,
+    createIdentityStreamFilter,
     createMarkerLineFilter,
     createTagEchoFilter,
     mayStartBiliInternal,
@@ -140,8 +141,16 @@ test("#5175 A: the signed-thinking channel is never rewritten by the drift rule"
     const echo = '<acpt tokens="18">m10556</acpt>';
     // Visible text channel: adjudicated.
     assert.equal(stripAcpTags(echo), "", "visible text channel is filtered");
-    // The verbatim channel's rule is identity, so an echo riding there is
-    // expected to survive — that is the invariant, not a leak.
+    // The verbatim channel rides the PRODUCTION identity filter — the same
+    // object `filterFor` hands the signed-thinking fields — so an echo there is
+    // expected to survive byte-for-byte: that is the invariant, not a leak.
+    // Asserting against `createIdentityStreamFilter()` keeps this a real
+    // tripwire: if a verbatim field is ever routed through a stripping filter,
+    // this fails instead of documenting a stub.
+    const identity = createIdentityStreamFilter();
+    assert.equal(identity.push(echo), echo, "the verbatim channel is byte-for-byte identity");
+    assert.equal(identity.flush(), "", "the identity filter buffers nothing");
+    assert.equal(identity.pending(), false, "the identity filter never holds bytes back");
 });
 
 test("#5175 A: the kernel's OWN protocol tags are never read as drift", () => {
