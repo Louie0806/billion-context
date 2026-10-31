@@ -638,3 +638,64 @@ test("#5178 negative: a genuine mismatched html pair stays prose", () => {
     assert.equal(stripDriftResidue(attrs), attrs,
         "a real name=value attribute slot must not license the bare-ref rule");
 });
+
+// ---------- #5175 last mile: the invariant that survives the residual ----------
+
+// Measured on the REAL plugin lane (`pipePluginChatWithBuf`), across 16 chunk
+// sizes from 1 to 200 bytes:
+//
+//   * no kernel ref and no drifted render-tag opener ever reaches the client —
+//     that was the reported harm, and it is gone at every size;
+//   * the delivered PROSE is identical at every size;
+//   * only which ref-LESS orphan fragments get removed varies with the cut.
+//
+// That last point is the honest residual: an orphan half whose `\x3c` was lost
+// upstream cannot be adjudicated without line state, and line state collides with
+// the #2190 balanced-markup contract (see the KNOWN RESIDUAL note above). What
+// must never vary is the citation bar and the prose. Pinning THOSE turns this
+// test into a tripwire for any future rule that starts eating content — such a
+// rule would break the skeleton assertion while every per-shape test still
+// passed.
+const FRAGMENT =
+    /<\/?[A-Za-z][A-Za-z0-9_]{0,40}[^<>]{0,40}>|(?<![\w<>/])[A-Za-z][A-Za-z0-9_]{0,40}>/g;
+function proseSkeleton(s: string): string {
+    return s.replace(new RegExp(FRAGMENT.source, "g"), "").replace(/\s+/g, " ").trim();
+}
+
+const LAST_MILE_CASES: Array<[string, string]> = [
+    ["the reported paragraph", REPORTED],
+    [
+        "an orphan half beside prose",
+        "Here is the report.\n\nacpt> </apct> <acpt m17138></acct>  </apct> </apct>\n\nThat is all.",
+    ],
+    [
+        "a drifted unit between two prose blocks",
+        'Start.\n\n<acpt tokens="80">m08844</action>\n\nMiddle words here.\n\n<acct tokens="0" text="text">m00257</acct>\n\nEnd.',
+    ],
+];
+
+const LAST_MILE_SIZES = [1, 2, 3, 5, 7, 11, 13, 17, 23, 31, 40, 50, 64, 90, 127, 200];
+
+for (const [name, text] of LAST_MILE_CASES) {
+    test(`#5175 last mile: ${name} varies only in ref-less residue, never in prose`, async () => {
+        const skeletons = new Set<string>();
+        for (const size of LAST_MILE_SIZES) {
+            const got = await driveChat(chunked(text, size));
+            assert.equal(
+                (got.match(/m\d{4,}/g) ?? []).length,
+                0,
+                `a kernel ref reached the client at size=${size}: ${JSON.stringify(got)}`,
+            );
+            assert.ok(
+                !/<(?:acpt|apct|acct|acad|acme|accent|actp)\b/i.test(got),
+                `a drifted render-tag opener reached the client at size=${size}: ${JSON.stringify(got)}`,
+            );
+            skeletons.add(proseSkeleton(got));
+        }
+        assert.equal(
+            skeletons.size,
+            1,
+            `the delivered prose changed with the chunking: ${JSON.stringify([...skeletons])}`,
+        );
+    });
+}
