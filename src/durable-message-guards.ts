@@ -157,30 +157,36 @@ export function dshRuntimeContextPath(msg: CoreMessage): string | undefined {
         : undefined;
 }
 
-/** dsh time-context identity (#5109): per-step clock readings injected by
- *  @deepseek-ai/dsh-time-context as user-role messages
- *  ("Time sampled while preparing turn N, step M: ..."; source:
- *  deepseek-ai/deepseek-harness packages/context/time-context/src/index.ts
- *  renderText — the same text family src/server.ts already treats as an
- *  auto-injected notification, #2286). Deliberately OUTSIDE the `durable/`
- *  namespace: readings are resent every eligible step, so unlike the four
- *  durable carriers a fold is self-healing and latest-pin protection would
- *  only pin stale clocks and bloat context — the recorded "time-context stays
- *  foldable" decision. The path still matters: kernel Rule 3 refuses
- *  virtual-path messages the last-user anchor (#5109), so a stale clock
- *  reading can never displace the newest human request from the protected
- *  zone. #2766: model echoes are never carriers (assistant gate below).
- *  Matching is PREFIX-anchored (trimmed), not substring: renderText always
- *  opens the message with the phrase, and a substring hit would reclassify
- *  a real human request that merely quotes it mid-sentence — stranding it
- *  from the Rule-3 anchor for no reason. Same discipline as
- *  isAutoInjectedNotification's prefix list (#2286). */
+/** #2286 wire shape (AUTO_INJECTED_NOTIFICATION_PREFIXES in src/server.ts):
+ *  the dsh agent loop injects one timestamp notice before each turn,
+ *  "Time sampled while preparing turn N, step M: <ts> …". Kept local — this
+ *  module must not import src/server.ts; tests pin the two lists in lockstep. */
+const TIME_CONTEXT_MARKER = "Time sampled while preparing turn";
+
+/** dsh per-turn time-context carrier (#5142, superseding #5109's naming):
+ *  the timestamp notice injected before each turn (marker above).
+ *  Deliberately FOLDABLE by design — unlike the four durable carriers it
+ *  carries no state beyond its own turn and must NEVER be pinned, so it
+ *  stays OUT of dshDurableToolPath / kernel protection. Its problem is
+ *  retirement, not foldability: the host re-sends it only on the turn it
+ *  was sampled for, so once folded it leaves the resent history FOREVER —
+ *  a permanent missing covered id that fold-reconcile used to count as
+ *  drift on every later turn (#5139: 157 such ids in one production
+ *  session, part of the monotonic 739→1045 growth). oneShotCarrierPaths
+ *  accounts that retirement as EXPECTED. Prefix match (trimmed) on purpose
+ *  (the turn-number/timestamp tail varies) — a substring hit would
+ *  reclassify a real human request that merely quotes the phrase
+ *  mid-sentence; case-insensitive like the other auto-injected notification
+ *  prefixes (#2286). The path still matters beyond accounting: kernel Rule 3
+ *  refuses virtual-path messages as the last-user anchor (#5109), so a stale
+ *  clock reading can never displace the newest human request from the
+ *  protected zone. #2766: model echoes are never carriers (assistant gate
+ *  below). */
 export function dshTimeContextPath(msg: CoreMessage): string | undefined {
-    return msg.role !== "assistant" && msg.contentType === "text" && typeof msg.text === "string" && msg.text.trim().startsWith("Time sampled while preparing turn")
-        ? "injected/time-context"
+    return msg.role !== "assistant" && msg.contentType === "text" && typeof msg.text === "string" && startsWithAsciiCI(msg.text.trim(), TIME_CONTEXT_MARKER)
+        ? "oneshot/time-context"
         : undefined;
 }
-
 /** dsh paste-to-context image carrier (#5142, reporter evidence 2026-10-29):
  *  the ptc-mode message dsh emits when a user pastes an image into context —
  *  a user-role (text, image) pair whose text block is the generated template
