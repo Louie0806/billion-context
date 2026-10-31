@@ -2123,6 +2123,57 @@ export class SessionStore {
         }
     }
 
+    /** #5312: foreign-block sweep data access. Null when the unified store is
+     *  unavailable (legacy-only lanes) — the sweep then reports "unavailable"
+     *  rather than guessing over an empty set. */
+    unifiedAllMessageIds(sessionId: string): string[] | null {
+        if (!this.shadow || this.shadow.stats.disabled) return null;
+        try {
+            return this.shadow.allMessageIds(sessionId);
+        } catch {
+            return null; // sidecar degraded mid-call: treat as unavailable
+        }
+    }
+
+    unifiedGetBlocks(sessionId: string): ReturnType<import("./storage/store.js").UnifiedStore["getBlocks"]> | null {
+        if (!this.shadow || this.shadow.stats.disabled) return null;
+        try {
+            return this.shadow.getBlocks(sessionId);
+        } catch {
+            return null; // sidecar degraded mid-call: treat as unavailable
+        }
+    }
+
+    unifiedListSessionIds(): string[] | null {
+        if (!this.shadow || this.shadow.stats.disabled) return null;
+        try {
+            return this.shadow.listSessionIds();
+        } catch {
+            return null; // sidecar degraded mid-call: treat as unavailable
+        }
+    }
+
+    /** #5312: reversible single-block archive / restore (see UnifiedStore). */
+    unifiedArchiveBlock(sessionId: string, blockId: string, archiveDir?: string): { ok: boolean; exportPath?: string; reason?: string; contentRowsDeleted?: number } | null {
+        if (!this.shadow || this.shadow.stats.disabled) return null;
+        try {
+            return this.shadow.archiveBlock(sessionId, blockId, { archiveDir: archiveDir ?? join(this.sessionsDir, "archive") });
+        } catch (err) {
+            this.log("warn", `[persist] unified block archive failed: ${String(err)}`);
+            return null;
+        }
+    }
+
+    unifiedRestoreBlock(sessionId: string, blockId: string, archiveDir?: string): { ok: boolean; reason?: string } | null {
+        if (!this.shadow || this.shadow.stats.disabled) return null;
+        try {
+            return this.shadow.restoreBlock(sessionId, blockId, { archiveDir: archiveDir ?? join(this.sessionsDir, "archive") });
+        } catch (err) {
+            this.log("warn", `[persist] unified block restore failed: ${String(err)}`);
+            return null;
+        }
+    }
+
     /** #3928: per-session index.db footprint for `bili sessions ls`. Null when
      *  the unified store is unavailable (legacy-only lanes) — sizes then
      *  degrade to the JSON-tree view. */
