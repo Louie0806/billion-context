@@ -251,7 +251,7 @@ export function restampRefsToLedger(
   const scratch: MessageRefMap = { byRaw, byRef };
   const displaced: string[] = [];
   const retiredThisPass = new Set<string>();
-  const leftovers: Array<{ rawId: string; from: string }> = [];
+  const leftovers: string[] = [];
   // MessageRefMap carries no cursor field — the caller recomputes it from the
   // highest used index (compress.ts:1047 pattern). We still track a local
   // cursor for free-number allocation during this pass.
@@ -281,7 +281,7 @@ export function restampRefsToLedger(
     // and retire nothing extra: our own from-slot simply goes live-free and
     // below the cursor, exactly like every normal move.
     if (retiredThisPass.has(target)) {
-      leftovers.push({ rawId, from: current });
+      leftovers.push(rawId);
       continue;
     }
     const occupant = byRef[target];
@@ -318,18 +318,18 @@ export function restampRefsToLedger(
     out.rehomed++;
     parked.add(rawId);
   }
-  for (const item of leftovers) {
-    if (parked.has(item.rawId)) continue;
-    const held = byRaw[item.rawId];
+  for (const rawId of leftovers) {
+    if (parked.has(rawId)) continue;
+    const held = byRaw[rawId];
     if (held === undefined) continue;
-    if (byRef[held] === item.rawId) delete byRef[held];
+    if (byRef[held] === rawId) delete byRef[held];
     const free = allocateFreeRef(scratch, nextIndex);
-    out.superseded.set(held, item.rawId);
-    byRaw[item.rawId] = free.text;
-    byRef[free.text] = item.rawId;
+    out.superseded.set(held, rawId);
+    byRaw[rawId] = free.text;
+    byRef[free.text] = rawId;
     nextIndex = free.index + 1;
     out.rehomed++;
-    parked.add(item.rawId);
+    parked.add(rawId);
   }
 
   state.messageRefs = { byRaw, byRef };
