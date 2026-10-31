@@ -19,7 +19,7 @@ import { stateDir } from "./paths.js";
 import { getStore } from "./persist.js";
 import type { CompressSettings } from "./config.js";
 import { ccrRetrievalTtlMs as knobCcrRetrievalTtlMs } from "./knobs.js";
-import type { PendingRetrieval, Session } from "./session.js";
+import { isDroppedContentStore, type PendingRetrieval, type Session } from "./session.js";
 import { toolFail, toolOk, type ProxyToolResult } from "./proxy-tool-result.js";
 
 export type CcrSettings = NonNullable<CompressSettings["ccr"]>;
@@ -134,8 +134,16 @@ export function contentStoreOf(session: Session): MessageContentStore {
  *  only when new entries appeared, so a no-growth turn costs nothing. */
 export function adoptContentStore(session: Session, store: MessageContentStore): void {
     const prev = session.contentStore;
-    const added = prev
-        ? Object.entries(store.byRef).filter(([ref]) => !(ref in prev.byRef))
+    // #4788 phase 2: a discharged (lazy) resident store is a Proxy that throws
+    // on first touch when its on-disk copy vanished under it (e.g. the sidecar
+    // was replaced by a directory, or the user deleted the sessions dir after
+    // the drop). Adoption is append-only and the incoming store already carries
+    // every ref (kernel processTurn re-ingests the history), so a THINNED prev
+    // is not a source of truth: treat it as absent instead of letting one stale
+    // path turn a normal turn into a hard failure.
+    const usablePrev = prev && !isDroppedContentStore(prev) ? prev : undefined;
+    const added = usablePrev
+        ? Object.entries(store.byRef).filter(([ref]) => !(ref in usablePrev.byRef))
         : Object.entries(store.byRef);
     session.contentStore = store;
     if (added.length === 0) return;

@@ -3239,7 +3239,13 @@ export class SessionStore {
             contentStoreRelPathFor(id, meta?.protocol, meta?.upstreamOrigin),
             contentStoreRelPathFor(id),
         ])) {
-            try { if (existsSync(p)) return true; } catch { /* probe only */ }
+            // A PATH is not a COPY: existsSync alone accepts a directory or a
+            // socket sitting at the sidecar name, and folding on that proof makes
+            // the next touch throw ("could not be re-materialized … refusing the
+            // thinned view") where a resident set was still in hand. Require a
+            // regular file — this mirrors what readContentStoreRels can actually
+            // read back, so the drop only happens when the reload is guaranteed.
+            try { if (statSync(p).isFile()) return true; } catch { /* probe only */ }
         }
         return false;
     }
