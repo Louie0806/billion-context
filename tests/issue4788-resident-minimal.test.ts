@@ -86,6 +86,10 @@ async function turn(store: SessionStore, s: Session, midFlight?: boolean): Promi
     if (midFlight) s.inFlight = 1;
     s.revisionEpoch = (s.revisionEpoch ?? 0) + 1;
     store.scheduleSave(s);
+    // #4788: while a caller awaits afterNextFlush, persist.ts keeps the pending
+    // debounce timer ref'd, so this settle is deterministic even in a node:test
+    // child whose only surviving handles are unref'd sockets — no test-side
+    // keep-alive needed here anymore.
     const landed = await store.afterNextFlush(s.id);
     if (midFlight) s.inFlight = 0;
     return landed;
