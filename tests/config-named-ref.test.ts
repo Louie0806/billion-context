@@ -43,7 +43,8 @@ test.after(() => {
 });
 
 test("resolveConfigFileRef: path refs are untouched (separator or CWD file)", () => {
-    assert.equal(resolveConfigFileRef("/abs/elsewhere.json"), "/abs/elsewhere.json");
+    const absRef = process.platform === "win32" ? "C:/abs/elsewhere.json" : "/abs/elsewhere.json";
+    assert.equal(resolveConfigFileRef(absRef), path.resolve(absRef));
     assert.equal(resolveConfigFileRef("rel/nested.json"), path.resolve("rel", "nested.json"));
     const cwdFile = path.join(process.cwd(), "cfg-name-cwd-probe.json");
     fs.writeFileSync(cwdFile, "{}");
